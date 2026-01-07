@@ -21,7 +21,27 @@ TreLLM automates step 2 and 3 by:
 
 1. Running as a background service that monitors the Trello board
 2. Detecting when new cards are added to the TODO list
-3. Automatically injecting the appropriate command into the tmux session running the AI assistant
+3. Parsing the card name to determine which project (and tmux window) should handle the task
+4. Automatically injecting the appropriate command into the correct tmux window running the AI assistant
+
+## Card Naming Convention
+
+Cards follow a structured naming format that enables automatic routing to the correct project:
+
+```
+<project-name> <task-description>
+```
+
+**Examples:**
+- `trellm implement polling for Trello API`
+- `myapp fix authentication bug in login flow`
+- `website update homepage hero section`
+
+**Key principles:**
+- The first word of the card name is the **project identifier**
+- The project identifier matches the **tmux window name** where the Claude Code instance for that project is running
+- One Trello board serves all projects, with routing handled by TreLLM based on the project prefix
+- This allows adding tasks from anywhere (mobile, web) to any project without switching contexts
 
 ## User Stories
 
@@ -43,13 +63,17 @@ As a software engineer using AI coding assistants, I want my Claude Code session
 - Poll the configured Trello board for new cards in the TODO list
 - Support configurable polling interval (default: 30 seconds)
 - Track which cards have already been processed to avoid duplicates
+- Parse the project identifier from the card name (first word)
 - Use Trello API webhooks as an optional enhancement for real-time notifications
 
-#### FR2: Command Injection
-- Inject commands into a specified tmux session/window
+#### FR2: Command Injection & Project Routing
+- Route commands to the correct tmux window based on the project identifier in the card name
+- The project identifier (first word of card name) maps directly to the tmux window name
+- Inject commands into the matched tmux session/window
 - Support configurable command templates (default: `/next`)
 - Support injecting card-specific prompts (e.g., card name and description)
 - Wait for the AI assistant to be idle before injecting new commands
+- Handle cases where the target tmux window doesn't exist (log warning, skip card)
 
 #### FR3: Configuration
 - YAML or JSON configuration file for settings:
@@ -71,9 +95,10 @@ As a software engineer using AI coding assistants, I want my Claude Code session
 - Register a Trello webhook for real-time notifications
 - Requires a publicly accessible endpoint (ngrok or similar for local dev)
 
-#### FR6: Multiple AI Assistant Support
-- Support multiple tmux sessions (Claude Code, Gemini CLI)
-- Round-robin or priority-based task distribution
+#### FR6: Advanced Project Management
+- Optional project validation against a configured list
+- Project-specific command templates (e.g., different commands for different AI assistants)
+- Project aliases (e.g., `tl` maps to `trellm` window)
 
 #### FR7: Status Dashboard
 - Simple web UI showing processed tasks
@@ -100,17 +125,26 @@ As a software engineer using AI coding assistants, I want my Claude Code session
 ### Components
 
 ```
-+------------------+     +-----------------+     +------------------+
-|   Trello API     |<--->|    TreLLM       |<--->|  tmux Session    |
-|   (Polling)      |     |   (Monitor)     |     |  (Claude Code)   |
-+------------------+     +-----------------+     +------------------+
-                               |
-                               v
-                         +-----------+
-                         |   State   |
-                         |   Store   |
-                         +-----------+
++------------------+     +-----------------+     +----------------------+
+|   Trello API     |<--->|    TreLLM       |<--->|  tmux Session        |
+|   (Polling)      |     |   (Monitor)     |     |  +-----------------+ |
++------------------+     +-----------------+     |  | window: trellm  | |
+                               |                 |  | (Claude Code)   | |
+                               |                 |  +-----------------+ |
+                               |                 |  | window: myapp   | |
+                               |                 |  | (Claude Code)   | |
+                               v                 |  +-----------------+ |
+                         +-----------+           |  | window: website | |
+                         |   State   |           |  | (Gemini CLI)    | |
+                         |   Store   |           |  +-----------------+ |
+                         +-----------+           +----------------------+
 ```
+
+**Routing Flow:**
+1. New card appears: `trellm add webhook support`
+2. TreLLM parses project identifier: `trellm`
+3. TreLLM finds tmux window named `trellm`
+4. TreLLM injects `/next` command into that window
 
 ### Technology Options
 
@@ -144,7 +178,9 @@ trello:
 
 tmux:
   session: "main"
-  window: "claude"  # optional, uses active window if not specified
+  # Window is determined dynamically from card name prefix
+  # Card "trellm fix bug" -> routes to window "trellm"
+  # Card "myapp add feature" -> routes to window "myapp"
 
 polling:
   interval_seconds: 30
@@ -156,12 +192,22 @@ command:
 
 state:
   file: "~/.trellm/state.json"
+
+# Optional: Define known projects for validation
+# If not defined, any first word is accepted as a project
+projects:
+  - name: "trellm"
+    description: "TreLLM automation tool"
+  - name: "myapp"
+    description: "My application project"
 ```
 
 ## Implementation Phases
 
 ### Phase 1: MVP
 - Basic polling of Trello TODO list
+- Parse project identifier from card name (first word)
+- Route commands to matching tmux window
 - tmux command injection with `/next`
 - Simple JSON state file
 - Configuration via environment variables
