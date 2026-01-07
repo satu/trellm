@@ -70,8 +70,13 @@ As a software engineer using AI coding assistants, I want my Claude Code session
 - Route commands to the correct tmux window based on the project identifier in the card name
 - The project identifier (first word of card name) maps directly to the tmux window name
 - Inject commands into the matched tmux session/window
-- Support configurable command templates (default: `/next`)
-- Support injecting card-specific prompts (e.g., card name and description)
+- **Inject the specific card ID** rather than a generic `/next` command to avoid race conditions
+- Support configurable command templates with card interpolation:
+  - `{card_id}` - The Trello card ID
+  - `{card_name}` - The full card name
+  - `{card_description}` - The card description
+  - `{card_url}` - Direct link to the card
+  - `{task_description}` - Card name without the project prefix
 - Wait for the AI assistant to be idle before injecting new commands
 - Handle cases where the target tmux window doesn't exist (log warning, skip card)
 
@@ -141,10 +146,20 @@ As a software engineer using AI coding assistants, I want my Claude Code session
 ```
 
 **Routing Flow:**
-1. New card appears: `trellm add webhook support`
+1. New card appears: `trellm add webhook support` (card ID: `abc123`)
 2. TreLLM parses project identifier: `trellm`
 3. TreLLM finds tmux window named `trellm`
-4. TreLLM injects `/next` command into that window
+4. TreLLM injects a command with the specific card ID into that window
+
+**Command Injection Approaches:**
+
+| Approach | Command Injected | Pros | Cons |
+|----------|-----------------|------|------|
+| Generic `/next` | `/next` | Simple, AI queries for next card | Race conditions if multiple cards added |
+| Card ID reference | `/card abc123` | Precise, no ambiguity | Requires custom slash command |
+| Direct prompt | `Work on Trello card abc123: add webhook support` | No custom command needed | Longer injection, more complex |
+
+**Recommended approach**: Direct prompt injection with card context, avoiding the need for custom slash commands while providing precise task targeting
 
 ### Technology Options
 
@@ -186,9 +201,19 @@ polling:
   interval_seconds: 30
 
 command:
-  template: "/next"
-  # Alternative: include card details
-  # template: "Work on: {card_name}\n\nDetails:\n{card_description}"
+  # Direct card ID injection (recommended) - avoids race conditions
+  template: |
+    Work on Trello card {card_id}: {task_description}
+
+    Card URL: {card_url}
+
+    {card_description}
+
+  # Alternative: simple /next command (legacy, not recommended)
+  # template: "/next"
+
+  # Alternative: custom slash command with card ID
+  # template: "/card {card_id}"
 
 state:
   file: "~/.trellm/state.json"
@@ -208,7 +233,7 @@ projects:
 - Basic polling of Trello TODO list
 - Parse project identifier from card name (first word)
 - Route commands to matching tmux window
-- tmux command injection with `/next`
+- **Direct card ID injection** with configurable template (including card ID, name, description, URL)
 - Simple JSON state file
 - Configuration via environment variables
 
@@ -232,7 +257,7 @@ projects:
 ## Open Questions
 
 1. Should we detect when Claude Code is busy/idle before injecting commands?
-2. Should we support card-specific commands beyond just `/next`?
+2. ~~Should we support card-specific commands beyond just `/next`?~~ **Resolved**: Yes, direct card ID injection is now the recommended approach
 3. What's the preferred language for the initial implementation?
 4. Should the service run as a systemd service or just in a tmux window?
 
