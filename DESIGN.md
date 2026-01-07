@@ -2,507 +2,686 @@
 
 ## Executive Summary
 
-This document presents the technical design for TreLLM, a bridge between Trello task management and AI coding assistants. After evaluating multiple approaches, I recommend a **Python-based event-driven architecture** using asyncio with a plugin system for extensibility.
+This document presents the technical design for TreLLM, a bridge between Trello task management and AI coding assistants. After evaluating multiple approaches, I recommend implementing TreLLM as an **MCP (Model Context Protocol) server** that Claude Code connects to natively.
+
+**Key insight**: Instead of injecting commands into terminals (tmux), TreLLM provides tasks via a clean API. The AI assistant **pulls** tasks when ready, rather than having tasks **pushed** to it. This eliminates the fragile tmux dependency and provides a robust, bidirectional communication channel.
 
 ---
 
-## Recommended Approach: Event-Driven Python with Plugin Architecture
+## Recommended Approach: MCP Server with TypeScript
 
 ### Why This Approach?
 
-1. **Rapid Development**: Python enables quick iteration and prototyping
-2. **Extensibility**: Plugin system allows adding new AI assistants without core changes
-3. **Async-Native**: asyncio handles polling, webhooks, and multiple tmux sessions efficiently
-4. **Low Barrier**: Most developers already have Python installed
+1. **Native Integration**: MCP is Claude Code's standard protocol for extensions
+2. **Pull Model**: AI assistant queries for tasks when ready (no busy/idle detection needed)
+3. **Bidirectional**: AI can query, update status, and add comments through the same channel
+4. **No tmux**: Eliminates fragile terminal injection
+5. **Official SDK**: TypeScript has first-class MCP SDK support
 
 ### Architecture Overview
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                              TreLLM Core                                │
+│                           Claude Code                                    │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │                         MCP Client                                 │  │
+│  │                                                                    │  │
+│  │  Tool Calls:                                                       │  │
+│  │  ├── get_next_task(project: "trellm") → Task                      │  │
+│  │  ├── list_tasks(project: "trellm") → Task[]                       │  │
+│  │  ├── mark_task_started(card_id: "abc123")                         │  │
+│  │  ├── mark_task_complete(card_id: "abc123")                        │  │
+│  │  └── add_comment(card_id: "abc123", text: "Claude: Done!")        │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    │ stdio (JSON-RPC)
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         TreLLM MCP Server                               │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                 │
-│  │   Source    │    │   Router    │    │    Sink     │                 │
-│  │   Plugin    │───▶│   (Core)    │───▶│   Plugin    │                 │
-│  └─────────────┘    └─────────────┘    └─────────────┘                 │
-│        │                   │                  │                         │
-│        ▼                   ▼                  ▼                         │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                 │
-│  │   Trello    │    │   State     │    │    tmux     │                 │
-│  │   Poller    │    │   Manager   │    │  Injector   │                 │
-│  └─────────────┘    └─────────────┘    └─────────────┘                 │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │                        Tool Handlers                             │   │
+│  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────────────────┐ │   │
+│  │  │ get_next_task│ │ list_tasks   │ │ mark_task_started/complete│ │   │
+│  │  └──────────────┘ └──────────────┘ └──────────────────────────┘ │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                    │                                    │
+│                                    ▼                                    │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │                         Task Manager                             │   │
+│  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐             │   │
+│  │  │  Task Cache  │ │ State Store  │ │ Project Filter│             │   │
+│  │  │  (in-memory) │ │   (JSON)     │ │              │             │   │
+│  │  └──────────────┘ └──────────────┘ └──────────────┘             │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                    │                                    │
+│                                    ▼                                    │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │                       Trello Service                             │   │
+│  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐             │   │
+│  │  │   Poller     │ │  API Client  │ │  Rate Limiter │             │   │
+│  │  │ (background) │ │              │ │              │             │   │
+│  │  └──────────────┘ └──────────────┘ └──────────────┘             │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
-
-Event Flow:
-  CardDiscovered → Router → ProjectMatched → CommandInjected → CardProcessed
+                                    │
+                                    ▼
+                         ┌─────────────────┐
+                         │   Trello API    │
+                         └─────────────────┘
 ```
 
 ### Core Components
 
-#### 1. Event Bus (Core)
+#### 1. MCP Server Entry Point
 
-The heart of TreLLM is a simple async event bus that decouples sources from sinks:
+```typescript
+// src/index.ts
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { TrelloService } from "./services/trello.js";
+import { TaskManager } from "./services/taskManager.js";
+import { registerTools } from "./tools/index.js";
 
-```python
-# trellm/core/events.py
-from dataclasses import dataclass
-from typing import Optional
+async function main() {
+  const server = new Server(
+    { name: "trellm", version: "1.0.0" },
+    { capabilities: { tools: {} } }
+  );
 
-@dataclass
-class CardEvent:
-    card_id: str
-    card_name: str
-    card_description: str
-    card_url: str
-    project: str  # Extracted from card name prefix
-    task_description: str  # Card name without project prefix
+  // Initialize services
+  const trelloService = new TrelloService({
+    apiKey: process.env.TRELLO_API_KEY!,
+    apiToken: process.env.TRELLO_API_TOKEN!,
+    boardId: process.env.TRELLO_BOARD_ID!,
+    todoListId: process.env.TRELLO_TODO_LIST_ID!,
+  });
 
-@dataclass
-class InjectionEvent:
-    project: str
-    command: str
-    card_id: str
+  const taskManager = new TaskManager(trelloService);
+
+  // Register MCP tools
+  registerTools(server, taskManager);
+
+  // Start background polling
+  taskManager.startPolling(30_000); // 30 seconds
+
+  // Connect via stdio
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}
+
+main().catch(console.error);
 ```
 
-#### 2. Source Plugin: Trello Poller
+#### 2. Tool Registration
 
-```python
-# trellm/sources/trello.py
-class TrelloSource:
-    """Polls Trello for new cards in TODO list."""
+```typescript
+// src/tools/index.ts
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { TaskManager } from "../services/taskManager.js";
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
 
-    async def poll(self) -> AsyncIterator[CardEvent]:
-        while True:
-            cards = await self.fetch_todo_cards()
-            for card in cards:
-                if not self.state.is_processed(card.id):
-                    yield self.parse_card(card)
-            await asyncio.sleep(self.interval)
+export function registerTools(server: Server, taskManager: TaskManager) {
+  // List available tools
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: [
+      {
+        name: "get_next_task",
+        description: "Get the next unprocessed task for a project from Trello",
+        inputSchema: {
+          type: "object",
+          properties: {
+            project: {
+              type: "string",
+              description: "Project name to filter tasks (e.g., 'trellm')",
+            },
+          },
+          required: ["project"],
+        },
+      },
+      {
+        name: "list_tasks",
+        description: "List all pending tasks for a project",
+        inputSchema: {
+          type: "object",
+          properties: {
+            project: {
+              type: "string",
+              description: "Project name to filter tasks",
+            },
+          },
+          required: ["project"],
+        },
+      },
+      {
+        name: "mark_task_started",
+        description: "Mark a task as started (in progress)",
+        inputSchema: {
+          type: "object",
+          properties: {
+            card_id: { type: "string", description: "Trello card ID" },
+          },
+          required: ["card_id"],
+        },
+      },
+      {
+        name: "mark_task_complete",
+        description: "Mark a task as complete and move to READY TO TRY",
+        inputSchema: {
+          type: "object",
+          properties: {
+            card_id: { type: "string", description: "Trello card ID" },
+          },
+          required: ["card_id"],
+        },
+      },
+      {
+        name: "add_comment",
+        description: "Add a comment to a Trello card",
+        inputSchema: {
+          type: "object",
+          properties: {
+            card_id: { type: "string", description: "Trello card ID" },
+            text: { type: "string", description: "Comment text" },
+          },
+          required: ["card_id", "text"],
+        },
+      },
+    ],
+  }));
 
-    def parse_card(self, card) -> CardEvent:
-        parts = card.name.split(' ', 1)
-        project = parts[0].lower()
-        task = parts[1] if len(parts) > 1 else ''
-        return CardEvent(
-            card_id=card.id,
-            card_name=card.name,
-            card_description=card.desc,
-            card_url=card.url,
-            project=project,
-            task_description=task
-        )
+  // Handle tool calls
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+
+    switch (name) {
+      case "get_next_task":
+        return await handleGetNextTask(taskManager, args.project);
+      case "list_tasks":
+        return await handleListTasks(taskManager, args.project);
+      case "mark_task_started":
+        return await handleMarkStarted(taskManager, args.card_id);
+      case "mark_task_complete":
+        return await handleMarkComplete(taskManager, args.card_id);
+      case "add_comment":
+        return await handleAddComment(taskManager, args.card_id, args.text);
+      default:
+        throw new Error(`Unknown tool: ${name}`);
+    }
+  });
+}
+
+async function handleGetNextTask(taskManager: TaskManager, project: string) {
+  const task = await taskManager.getNextTask(project);
+  if (!task) {
+    return {
+      content: [{ type: "text", text: "No pending tasks for this project" }],
+    };
+  }
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(task, null, 2),
+      },
+    ],
+  };
+}
 ```
 
-#### 3. Router (Core)
+#### 3. Task Manager
 
-```python
-# trellm/core/router.py
-class Router:
-    """Routes cards to appropriate tmux windows based on project."""
+```typescript
+// src/services/taskManager.ts
+import { TrelloService, TrelloCard } from "./trello.js";
+import { StateStore } from "./stateStore.js";
 
-    def __init__(self, config: Config, sinks: dict[str, Sink]):
-        self.config = config
-        self.sinks = sinks  # project_name -> Sink
-        self.template = Template(config.command_template)
+export interface Task {
+  card_id: string;
+  card_name: string;
+  card_description: string;
+  card_url: string;
+  project: string;
+  task_description: string;
+}
 
-    async def route(self, event: CardEvent) -> bool:
-        if event.project not in self.sinks:
-            logger.warning(f"No sink for project: {event.project}")
-            return False
+export class TaskManager {
+  private trello: TrelloService;
+  private state: StateStore;
+  private cache: Map<string, Task> = new Map();
+  private pollingInterval?: NodeJS.Timeout;
 
-        command = self.template.render(
-            card_id=event.card_id,
-            card_name=event.card_name,
-            card_description=event.card_description,
-            card_url=event.card_url,
-            task_description=event.task_description
-        )
+  constructor(trello: TrelloService) {
+    this.trello = trello;
+    this.state = new StateStore();
+  }
 
-        sink = self.sinks[event.project]
-        return await sink.inject(command, event.card_id)
+  startPolling(intervalMs: number) {
+    this.poll(); // Initial poll
+    this.pollingInterval = setInterval(() => this.poll(), intervalMs);
+  }
+
+  private async poll() {
+    const cards = await this.trello.getTodoCards();
+    this.cache.clear();
+
+    for (const card of cards) {
+      const task = this.parseCard(card);
+      this.cache.set(card.id, task);
+    }
+  }
+
+  private parseCard(card: TrelloCard): Task {
+    const parts = card.name.split(" ", 2);
+    const project = parts[0].toLowerCase();
+    const taskDescription = parts.length > 1 ? card.name.slice(project.length + 1) : "";
+
+    return {
+      card_id: card.id,
+      card_name: card.name,
+      card_description: card.desc,
+      card_url: card.url,
+      project,
+      task_description: taskDescription,
+    };
+  }
+
+  async getNextTask(project: string): Promise<Task | null> {
+    for (const task of this.cache.values()) {
+      if (task.project === project && !this.state.isProcessed(task.card_id)) {
+        return task;
+      }
+    }
+    return null;
+  }
+
+  async listTasks(project: string): Promise<Task[]> {
+    return Array.from(this.cache.values()).filter(
+      (task) => task.project === project && !this.state.isProcessed(task.card_id)
+    );
+  }
+
+  async markStarted(cardId: string) {
+    this.state.markStarted(cardId);
+    await this.trello.addComment(cardId, "Claude: Starting work on this task...");
+  }
+
+  async markComplete(cardId: string) {
+    this.state.markComplete(cardId);
+    await this.trello.moveToReadyToTry(cardId);
+  }
+
+  async addComment(cardId: string, text: string) {
+    await this.trello.addComment(cardId, text);
+  }
+}
 ```
 
-#### 4. Sink Plugin: tmux Injector
+#### 4. Trello Service
 
-```python
-# trellm/sinks/tmux.py
-class TmuxSink:
-    """Injects commands into a tmux window."""
+```typescript
+// src/services/trello.ts
+export interface TrelloCard {
+  id: string;
+  name: string;
+  desc: string;
+  url: string;
+}
 
-    def __init__(self, session: str, window: str):
-        self.session = session
-        self.window = window
+export class TrelloService {
+  private apiKey: string;
+  private apiToken: string;
+  private boardId: string;
+  private todoListId: string;
+  private readyToTryListId?: string;
 
-    async def inject(self, command: str, card_id: str) -> bool:
-        # Escape special characters for tmux
-        escaped = self.escape_for_tmux(command)
+  constructor(config: {
+    apiKey: string;
+    apiToken: string;
+    boardId: string;
+    todoListId: string;
+  }) {
+    this.apiKey = config.apiKey;
+    this.apiToken = config.apiToken;
+    this.boardId = config.boardId;
+    this.todoListId = config.todoListId;
+  }
 
-        # Check if window exists
-        if not await self.window_exists():
-            logger.error(f"Window {self.window} not found")
-            return False
+  private async request(path: string, options: RequestInit = {}) {
+    const url = new URL(`https://api.trello.com/1${path}`);
+    url.searchParams.set("key", this.apiKey);
+    url.searchParams.set("token", this.apiToken);
 
-        # Inject the command
-        proc = await asyncio.create_subprocess_exec(
-            'tmux', 'send-keys', '-t',
-            f'{self.session}:{self.window}',
-            escaped, 'Enter'
-        )
-        await proc.wait()
-        return proc.returncode == 0
+    const response = await fetch(url, options);
+    if (!response.ok) {
+      throw new Error(`Trello API error: ${response.status}`);
+    }
+    return response.json();
+  }
 
-    async def window_exists(self) -> bool:
-        proc = await asyncio.create_subprocess_exec(
-            'tmux', 'list-windows', '-t', self.session,
-            stdout=asyncio.subprocess.PIPE
-        )
-        stdout, _ = await proc.communicate()
-        return self.window in stdout.decode()
+  async getTodoCards(): Promise<TrelloCard[]> {
+    return this.request(`/lists/${this.todoListId}/cards`);
+  }
+
+  async addComment(cardId: string, text: string) {
+    return this.request(`/cards/${cardId}/actions/comments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+  }
+
+  async moveToReadyToTry(cardId: string) {
+    if (!this.readyToTryListId) {
+      // Discover the READY TO TRY list
+      const lists = await this.request(`/boards/${this.boardId}/lists`);
+      const readyList = lists.find((l: any) => l.name === "READY TO TRY");
+      if (readyList) {
+        this.readyToTryListId = readyList.id;
+      }
+    }
+
+    if (this.readyToTryListId) {
+      return this.request(`/cards/${cardId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idList: this.readyToTryListId }),
+      });
+    }
+  }
+}
 ```
 
-#### 5. State Manager
+#### 5. State Store
 
-```python
-# trellm/core/state.py
-class StateManager:
-    """Tracks processed cards to avoid duplicates."""
+```typescript
+// src/services/stateStore.ts
+import fs from "fs";
+import path from "path";
+import os from "os";
 
-    def __init__(self, path: Path):
-        self.path = path
-        self.state = self.load()
+interface State {
+  processed: Record<string, { status: string; timestamp: string }>;
+}
 
-    def is_processed(self, card_id: str) -> bool:
-        return card_id in self.state.get('processed', {})
+export class StateStore {
+  private statePath: string;
+  private state: State;
 
-    def mark_processed(self, card_id: str, timestamp: str):
-        self.state.setdefault('processed', {})[card_id] = {
-            'timestamp': timestamp,
-            'status': 'injected'
-        }
-        self.save()
+  constructor() {
+    this.statePath = path.join(os.homedir(), ".trellm", "state.json");
+    this.state = this.load();
+  }
 
-    def should_reprocess(self, card_id: str, last_activity: str) -> bool:
-        """Check if card was moved back to TODO after processing."""
-        processed = self.state.get('processed', {}).get(card_id)
-        if not processed:
-            return True
-        return last_activity > processed['timestamp']
+  private load(): State {
+    try {
+      const dir = path.dirname(this.statePath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      if (fs.existsSync(this.statePath)) {
+        return JSON.parse(fs.readFileSync(this.statePath, "utf-8"));
+      }
+    } catch (e) {
+      console.error("Failed to load state:", e);
+    }
+    return { processed: {} };
+  }
+
+  private save() {
+    fs.writeFileSync(this.statePath, JSON.stringify(this.state, null, 2));
+  }
+
+  isProcessed(cardId: string): boolean {
+    return cardId in this.state.processed;
+  }
+
+  markStarted(cardId: string) {
+    this.state.processed[cardId] = {
+      status: "started",
+      timestamp: new Date().toISOString(),
+    };
+    this.save();
+  }
+
+  markComplete(cardId: string) {
+    this.state.processed[cardId] = {
+      status: "complete",
+      timestamp: new Date().toISOString(),
+    };
+    this.save();
+  }
+}
 ```
 
 ### Directory Structure
 
 ```
 trellm/
-├── __init__.py
-├── __main__.py          # Entry point: python -m trellm
-├── cli.py               # Click-based CLI
-├── config.py            # Configuration loading
-├── core/
-│   ├── __init__.py
-│   ├── events.py        # Event dataclasses
-│   ├── router.py        # Card routing logic
-│   ├── state.py         # State persistence
-│   └── bus.py           # Async event bus
-├── sources/
-│   ├── __init__.py
-│   ├── base.py          # Source protocol
-│   └── trello.py        # Trello polling source
-├── sinks/
-│   ├── __init__.py
-│   ├── base.py          # Sink protocol
-│   └── tmux.py          # tmux injection sink
-└── templates/
-    └── default.txt      # Default command template
+├── package.json
+├── tsconfig.json
+├── src/
+│   ├── index.ts           # Entry point, MCP server setup
+│   ├── tools/
+│   │   └── index.ts       # Tool registration and handlers
+│   └── services/
+│       ├── trello.ts      # Trello API client
+│       ├── taskManager.ts # Task caching and filtering
+│       └── stateStore.ts  # State persistence
+└── dist/                  # Compiled JavaScript
 ```
 
-### Configuration
+### Installation & Usage
 
-```yaml
-# ~/.trellm/config.yaml
-trello:
-  api_key: ${TRELLO_API_KEY}
-  api_token: ${TRELLO_API_TOKEN}
-  board_id: "694dd9802e3ad21db9ca5da1"
-  todo_list_id: "694dd98f57680df4b26fe1c1"
-  polling_interval: 30
+```bash
+# Install globally
+npm install -g trellm
 
-tmux:
-  session: "dev"
-  # Windows are auto-discovered from project names
-
-command:
-  template: |
-    Work on Trello card {card_id}: {task_description}
-
-    Card: {card_url}
-
-    {card_description}
-
-state:
-  path: ~/.trellm/state.json
-
-logging:
-  level: INFO
-  file: ~/.trellm/trellm.log
+# Or run directly
+npx trellm
 ```
 
-### Main Loop
+Add to Claude Code's MCP configuration (`~/.claude.json` or via settings):
 
-```python
-# trellm/__main__.py
-async def main():
-    config = load_config()
-    state = StateManager(config.state.path)
-
-    # Initialize source
-    source = TrelloSource(
-        api_key=config.trello.api_key,
-        api_token=config.trello.api_token,
-        board_id=config.trello.board_id,
-        list_id=config.trello.todo_list_id,
-        interval=config.trello.polling_interval,
-        state=state
-    )
-
-    # Initialize sinks (one per discovered project/window)
-    sinks = discover_tmux_windows(config.tmux.session)
-
-    # Initialize router
-    router = Router(config, sinks)
-
-    # Main event loop
-    async for card_event in source.poll():
-        logger.info(f"New card: {card_event.card_name}")
-
-        # Add acknowledgment comment
-        await source.add_comment(
-            card_event.card_id,
-            "Claude: Starting work on this task..."
-        )
-
-        # Route to appropriate sink
-        success = await router.route(card_event)
-
-        if success:
-            state.mark_processed(card_event.card_id, datetime.utcnow().isoformat())
-            logger.info(f"Injected card {card_event.card_id} to {card_event.project}")
-        else:
-            logger.error(f"Failed to inject card {card_event.card_id}")
-
-if __name__ == "__main__":
-    asyncio.run(main())
+```json
+{
+  "mcpServers": {
+    "trellm": {
+      "command": "npx",
+      "args": ["trellm"],
+      "env": {
+        "TRELLO_API_KEY": "your-api-key",
+        "TRELLO_API_TOKEN": "your-api-token",
+        "TRELLO_BOARD_ID": "694dd9802e3ad21db9ca5da1",
+        "TRELLO_TODO_LIST_ID": "694dd98f57680df4b26fe1c1"
+      }
+    }
+  }
+}
 ```
 
 ---
 
 ## Alternative Approaches Considered
 
-### Alternative 1: Go-based Single Binary
+### Alternative 1: tmux Injection (Original Approach)
 
-**Description**: Implement TreLLM as a statically-compiled Go binary with embedded configuration.
+**Description**: Run TreLLM as a background process that monitors Trello and injects commands into tmux sessions using `tmux send-keys`.
 
 **Architecture**:
 ```
-┌─────────────────────────────────────────┐
-│           TreLLM (Go Binary)            │
-├─────────────────────────────────────────┤
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐  │
-│  │ Trello  │  │  State  │  │  tmux   │  │
-│  │ Client  │  │  (Bolt) │  │ Wrapper │  │
-│  └─────────┘  └─────────┘  └─────────┘  │
-│         │          │           │        │
-│         └────────┬─────────────┘        │
-│                  ▼                      │
-│           ┌───────────┐                 │
-│           │   Main    │                 │
-│           │   Loop    │                 │
-│           └───────────┘                 │
-└─────────────────────────────────────────┘
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   Trello    │────▶│   TreLLM    │────▶│    tmux     │
+│   Poller    │     │   (Push)    │     │  send-keys  │
+└─────────────┘     └─────────────┘     └─────────────┘
+                                               │
+                                               ▼
+                                        ┌─────────────┐
+                                        │ Claude Code │
+                                        │  (passive)  │
+                                        └─────────────┘
 ```
 
 **Pros**:
-- Single binary distribution (no dependencies)
-- Excellent performance and low memory footprint
-- Built-in concurrency with goroutines
-- Can run as a systemd service easily
-- BoltDB for embedded state storage
+- Works with any terminal application
+- No changes needed to Claude Code
+- Simple implementation
 
 **Cons**:
-- Longer development time
-- Less flexible for rapid prototyping
-- Harder to add plugins/extensions
-- Requires Go toolchain for modifications
+- Requires tmux (not universal)
+- Fragile text injection (escaping issues)
+- No feedback channel (push-only)
+- Can't detect if Claude Code is busy
+- Hard to handle multiple projects
 
-**When to choose**: When distribution to multiple machines is important, or when running on resource-constrained systems.
+**When to choose**: Quick POC or when MCP is not available.
 
 ---
 
-### Alternative 2: Node.js with Real-time Webhooks
+### Alternative 2: File-based Queue
 
-**Description**: Use Node.js with Express to receive Trello webhooks for instant notifications, plus Socket.io for a real-time dashboard.
+**Description**: TreLLM writes tasks to a file, Claude Code watches the file or reads it on `/next`.
 
 **Architecture**:
 ```
-                    ┌─────────────────┐
-                    │    Trello       │
-                    │   Webhooks      │
-                    └────────┬────────┘
-                             │ POST /webhook
-                             ▼
-┌─────────────────────────────────────────────────────┐
-│                  TreLLM (Node.js)                   │
-├─────────────────────────────────────────────────────┤
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  │
-│  │   Express   │  │   Event     │  │  Socket.io  │  │
-│  │   Server    │──│   Queue     │──│   Server    │  │
-│  └─────────────┘  └─────────────┘  └─────────────┘  │
-│         │                │                │         │
-│         ▼                ▼                ▼         │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  │
-│  │  Webhook    │  │   Worker    │  │  Dashboard  │  │
-│  │  Handler    │  │  (Inject)   │  │   (React)   │  │
-│  └─────────────┘  └─────────────┘  └─────────────┘  │
-└─────────────────────────────────────────────────────┘
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   Trello    │────▶│   TreLLM    │────▶│  task.json  │
+│   Poller    │     │   Writer    │     │   (file)    │
+└─────────────┘     └─────────────┘     └─────────────┘
+                                               │
+                                               │ read
+                                               ▼
+                                        ┌─────────────┐
+                                        │ Claude Code │
+                                        │  /next cmd  │
+                                        └─────────────┘
+```
+
+**Implementation**:
+```typescript
+// TreLLM writes to ~/.trellm/tasks/trellm.json
+{
+  "tasks": [
+    {
+      "card_id": "abc123",
+      "card_name": "trellm implement feature X",
+      "status": "pending"
+    }
+  ]
+}
+
+// /next command reads the file
+// Read ~/.trellm/tasks/{project}.json and work on first pending task
 ```
 
 **Pros**:
-- Real-time notifications (no polling delay)
-- Built-in web dashboard capability
-- Excellent async handling
-- Large ecosystem (npm)
-- WebSocket support for live updates
+- Simple implementation
+- No network protocol needed
+- Easy to debug (just read the file)
+- Works with any AI assistant that can read files
 
 **Cons**:
-- Requires public endpoint for webhooks (ngrok for local dev)
-- Larger dependency footprint (node_modules)
-- More complex setup
-- Webhook registration complexity
+- No real-time updates without file watching
+- State synchronization complexity
+- Limited API (just read/write)
+- Claude Code needs file read access
 
-**When to choose**: When real-time responsiveness is critical, or when a web dashboard is a priority.
+**When to choose**: When MCP is not available and simplicity is paramount.
 
 ---
 
-### Alternative 3: Shell Script + cron
+### Alternative 3: HTTP API Server
 
-**Description**: Ultra-minimal approach using bash scripts and cron for polling.
+**Description**: TreLLM runs as an HTTP server that Claude Code calls via `curl` or fetch.
 
 **Architecture**:
 ```
-┌─────────────────────────────────────────┐
-│              cron (every 30s)           │
-│                    │                    │
-│                    ▼                    │
-│  ┌─────────────────────────────────┐    │
-│  │         trellm.sh               │    │
-│  │  ┌─────────────────────────┐    │    │
-│  │  │ 1. curl Trello API      │    │    │
-│  │  │ 2. jq parse JSON        │    │    │
-│  │  │ 3. Check state file     │    │    │
-│  │  │ 4. tmux send-keys       │    │    │
-│  │  │ 5. Update state file    │    │    │
-│  │  └─────────────────────────┘    │    │
-│  └─────────────────────────────────┘    │
-│                                         │
-│  State: ~/.trellm/processed.txt         │
-└─────────────────────────────────────────┘
-```
-
-**Implementation sketch**:
-```bash
-#!/bin/bash
-# trellm.sh - Minimal TreLLM implementation
-
-STATE_FILE="$HOME/.trellm/processed.txt"
-API_KEY="${TRELLO_API_KEY}"
-TOKEN="${TRELLO_TOKEN}"
-BOARD_ID="694dd9802e3ad21db9ca5da1"
-LIST_ID="694dd98f57680df4b26fe1c1"
-
-# Fetch TODO cards
-cards=$(curl -s "https://api.trello.com/1/lists/$LIST_ID/cards?key=$API_KEY&token=$TOKEN")
-
-# Process each card
-echo "$cards" | jq -r '.[] | "\(.id)|\(.name)"' | while IFS='|' read -r id name; do
-    # Skip if already processed
-    grep -q "^$id$" "$STATE_FILE" 2>/dev/null && continue
-
-    # Extract project (first word)
-    project=$(echo "$name" | cut -d' ' -f1)
-    task=$(echo "$name" | cut -d' ' -f2-)
-
-    # Inject into tmux
-    tmux send-keys -t "dev:$project" "Work on card $id: $task" Enter
-
-    # Mark as processed
-    echo "$id" >> "$STATE_FILE"
-done
+┌─────────────┐     ┌─────────────────────┐
+│   Trello    │────▶│      TreLLM         │
+│   Poller    │     │   HTTP Server       │
+└─────────────┘     │   :8765             │
+                    │                     │
+                    │  GET /tasks/trellm  │
+                    │  POST /tasks/:id/..│
+                    └─────────────────────┘
+                              │
+                              │ HTTP
+                              ▼
+                    ┌─────────────────────┐
+                    │    Claude Code      │
+                    │  (curl/fetch)       │
+                    └─────────────────────┘
 ```
 
 **Pros**:
-- Zero dependencies (just bash, curl, jq)
-- Trivial to understand and modify
-- Works on any Unix system
-- Easy to debug
-- Can run from cron or as a loop
+- Language agnostic
+- Easy to test with curl
+- Can add web dashboard later
+- RESTful, familiar pattern
 
 **Cons**:
-- Limited error handling
-- No webhook support possible
-- Harder to extend
-- No configuration file (hardcoded or env vars)
-- State management is basic
+- Requires port management
+- HTTP overhead for local communication
+- Need to handle authentication
+- Not as integrated as MCP
 
-**When to choose**: For quick personal use, proof of concept, or systems where installing Python/Node is not possible.
+**When to choose**: When building a dashboard or when multiple non-MCP clients need access.
 
 ---
 
 ## Comparison Matrix
 
-| Criteria | Python (Recommended) | Go | Node.js | Shell |
-|----------|---------------------|-----|---------|-------|
-| Development Speed | Fast | Slow | Medium | Very Fast |
-| Distribution | pip install | Single binary | npm install | Copy script |
-| Dependencies | Few (requests, pyyaml) | None | Many | curl, jq |
-| Extensibility | Excellent (plugins) | Good | Excellent | Poor |
-| Real-time Support | Polling + optional webhook | Polling | Native webhooks | Polling only |
-| Dashboard | Possible (Flask) | Possible | Easy (Express) | No |
-| Memory Footprint | Medium (~30MB) | Low (~10MB) | High (~50MB+) | Minimal |
-| Maintenance | Easy | Medium | Medium | Easy |
+| Criteria | MCP Server (Recommended) | tmux Injection | File Queue | HTTP API |
+|----------|-------------------------|----------------|------------|----------|
+| Integration | Native Claude Code | External | File-based | HTTP calls |
+| Bidirectional | Yes | No | Limited | Yes |
+| Real-time | Yes | Yes | No | Yes |
+| Dependencies | MCP SDK | tmux | None | HTTP server |
+| Complexity | Medium | Low | Low | Medium |
+| Reliability | High | Low | Medium | High |
+| Multi-client | Yes | Complex | Yes | Yes |
+| Testing | Easy (mock) | Hard | Easy | Easy |
 
 ---
 
 ## Implementation Roadmap
 
-### Week 1: MVP
-- [ ] Project skeleton with Poetry
-- [ ] Trello poller with state management
-- [ ] tmux injector
-- [ ] Basic CLI (start, stop, status)
-- [ ] Configuration loading
+### Phase 1: MVP (Week 1)
+- [x] Project skeleton with TypeScript
+- [ ] MCP server with stdio transport
+- [ ] Core tools: get_next_task, list_tasks
+- [ ] Trello API client
+- [ ] Basic state persistence
 
-### Week 2: Polish
-- [ ] Logging and error handling
-- [ ] Retry logic with exponential backoff
-- [ ] Acknowledgment comments on cards
-- [ ] Project validation
+### Phase 2: Full Feature Set (Week 2)
+- [ ] mark_task_started, mark_task_complete, add_comment tools
+- [ ] Background polling
+- [ ] Error handling and retry logic
+- [ ] Configuration file support
 
-### Week 3: Advanced Features
-- [ ] Webhook support (optional)
-- [ ] Idle detection for Claude Code
-- [ ] Simple status dashboard
+### Phase 3: Polish (Week 3)
+- [ ] npm package publishing
+- [ ] Documentation
+- [ ] Integration tests
+- [ ] Example /next command for Claude Code
 
 ---
 
 ## Decision
 
-**I recommend the Python-based event-driven approach** because:
+**I recommend the MCP Server approach** because:
 
-1. **Speed to MVP**: We can have a working prototype in days, not weeks
-2. **Flexibility**: Plugin architecture allows easy extension
-3. **Maintainability**: Python is readable and widely known
-4. **Good Enough Performance**: For a polling service running every 30s, Python's performance is more than adequate
-5. **Future Options**: If distribution becomes important, we can rewrite the core in Go while keeping the same architecture
+1. **Native Integration**: MCP is the standard protocol for Claude Code extensions
+2. **Pull Model**: Eliminates the need for busy/idle detection - Claude pulls when ready
+3. **Bidirectional**: AI can query tasks, update status, and add comments
+4. **No tmux**: Removes a fragile dependency entirely
+5. **Official SDK**: TypeScript MCP SDK is well-supported and documented
+6. **Future-proof**: MCP is the foundation for Claude Code's extensibility
 
-The shell script alternative is a viable "plan B" for immediate use while developing the full solution.
+The file-based queue is a viable fallback if MCP setup proves problematic.

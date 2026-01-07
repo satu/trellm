@@ -2,7 +2,7 @@
 
 ## Overview
 
-TreLLM is an automation tool that bridges Trello boards with AI coding assistants (Claude Code, Gemini CLI). It monitors a Trello board for new TODO items and automatically triggers the AI assistant to work on tasks, enabling a hands-free workflow for software development.
+TreLLM is an automation tool that bridges Trello boards with AI coding assistants (Claude Code, Gemini CLI). It monitors a Trello board for new TODO items and makes them available to AI assistants, enabling a hands-free workflow for software development.
 
 ## Problem Statement
 
@@ -17,12 +17,15 @@ This manual step breaks the flow and requires constant attention to know when ne
 
 ## Solution
 
-TreLLM automates step 2 and 3 by:
+TreLLM eliminates the manual step by acting as an **MCP (Model Context Protocol) server** that Claude Code connects to. When Claude Code needs a task, it queries TreLLM directly:
 
-1. Running as a background service that monitors the Trello board
-2. Detecting when new cards are added to the TODO list
-3. Parsing the card name to determine which project (and tmux window) should handle the task
-4. Automatically injecting the appropriate command into the correct tmux window running the AI assistant
+1. TreLLM runs as a background MCP server
+2. Claude Code connects to TreLLM via MCP
+3. When the user runs `/next`, Claude Code queries TreLLM for the next task
+4. TreLLM returns the task details directly to Claude Code
+5. Claude Code works on the task
+
+**Key insight**: Instead of injecting commands into a terminal (tmux), TreLLM provides tasks via a clean API. The AI assistant pulls tasks when ready, rather than having tasks pushed to it.
 
 ## Card Naming Convention
 
@@ -39,18 +42,18 @@ Cards follow a structured naming format that enables automatic routing to the co
 
 **Key principles:**
 - The first word of the card name is the **project identifier**
-- The project identifier matches the **tmux window name** where the Claude Code instance for that project is running
-- One Trello board serves all projects, with routing handled by TreLLM based on the project prefix
+- The project identifier is used by TreLLM to filter tasks for a specific project
+- One Trello board serves all projects, with filtering handled by the AI assistant's project context
 - This allows adding tasks from anywhere (mobile, web) to any project without switching contexts
 
 ## User Stories
 
 ### Primary User Story
-As a software engineer using AI coding assistants, I want my Claude Code session to automatically start working on new Trello tasks so that I can add tasks from anywhere (mobile, web) and have them processed without manual intervention.
+As a software engineer using AI coding assistants, I want my Claude Code session to automatically know about new Trello tasks so that I can add tasks from anywhere (mobile, web) and have them processed without manual intervention.
 
 ### Secondary User Stories
 - As a user, I want to configure which Trello board and list to monitor
-- As a user, I want to specify which tmux session/window to inject commands into
+- As a user, I want Claude Code to query for tasks relevant to my current project
 - As a user, I want to see logs of what tasks were triggered
 - As a user, I want the system to handle rate limiting gracefully
 - As a user, I want to be able to pause/resume automation without stopping the service
@@ -64,50 +67,47 @@ As a software engineer using AI coding assistants, I want my Claude Code session
 - Support configurable polling interval (default: 30 seconds)
 - Track which cards have already been processed to avoid duplicates
 - Parse the project identifier from the card name (first word)
-- Use Trello API webhooks as an optional enhancement for real-time notifications
+- Cache card data locally for fast queries
 
-#### FR2: Command Injection & Project Routing
-- Route commands to the correct tmux window based on the project identifier in the card name
-- The project identifier (first word of card name) maps directly to the tmux window name
-- Inject commands into the matched tmux session/window
-- **Inject the specific card ID** rather than a generic `/next` command to avoid race conditions
-- Support configurable command templates with card interpolation:
-  - `{card_id}` - The Trello card ID
-  - `{card_name}` - The full card name
-  - `{card_description}` - The card description
-  - `{card_url}` - Direct link to the card
-  - `{task_description}` - Card name without the project prefix
-- Wait for the AI assistant to be idle before injecting new commands
-- Handle cases where the target tmux window doesn't exist (log warning, skip card)
+#### FR2: MCP Server Interface
+- Implement MCP server protocol for Claude Code integration
+- Provide tools for AI assistants to:
+  - `get_next_task(project)` - Get the next unprocessed task for a project
+  - `list_tasks(project)` - List all pending tasks for a project
+  - `mark_task_started(card_id)` - Mark a task as in-progress
+  - `mark_task_complete(card_id)` - Mark a task as complete (move to READY TO TRY)
+  - `add_comment(card_id, text)` - Add a comment to a card
+- Support filtering by project identifier
 
 #### FR3: Configuration
 - YAML or JSON configuration file for settings:
   - Trello API credentials
   - Board ID and TODO list ID
-  - tmux session name and window identifier
   - Polling interval
-  - Command template
+  - MCP server settings (port, auth)
 - Environment variable support for sensitive credentials
 
 #### FR4: State Management
 - Persist state of processed cards across restarts
 - Track card IDs that have been sent to the AI assistant
 - Handle cards that are moved back to TODO (re-queue based on activity)
+- Sync state with Trello to detect external changes
 
 ### Optional Features (Future)
 
 #### FR5: Webhook Support
 - Register a Trello webhook for real-time notifications
+- Push notifications to connected Claude Code instances
 - Requires a publicly accessible endpoint (ngrok or similar for local dev)
 
 #### FR6: Advanced Project Management
 - Optional project validation against a configured list
-- Project-specific command templates (e.g., different commands for different AI assistants)
-- Project aliases (e.g., `tl` maps to `trellm` window)
+- Project-specific configurations
+- Project aliases (e.g., `tl` maps to `trellm`)
 
 #### FR7: Status Dashboard
-- Simple web UI showing processed tasks
-- Real-time status of the AI assistant
+- Simple web UI showing pending and processed tasks
+- Real-time status of connected AI assistants
 
 ## Non-Functional Requirements
 
@@ -119,107 +119,108 @@ As a software engineer using AI coding assistants, I want my Claude Code session
 ### NFR2: Resource Efficiency
 - Minimal CPU and memory footprint when idle
 - Efficient API usage to stay within Trello rate limits
+- Local caching to minimize API calls
 
 ### NFR3: Ease of Installation
 - Single binary or simple Python/Node.js package
 - Clear setup instructions
-- Minimal dependencies
+- Works as a Claude Code MCP server with minimal configuration
 
 ## Technical Architecture
 
 ### Components
 
 ```
-+------------------+     +-----------------+     +----------------------+
-|   Trello API     |<--->|    TreLLM       |<--->|  tmux Session        |
-|   (Polling)      |     |   (Monitor)     |     |  +-----------------+ |
-+------------------+     +-----------------+     |  | window: trellm  | |
-                               |                 |  | (Claude Code)   | |
-                               |                 |  +-----------------+ |
-                               |                 |  | window: myapp   | |
-                               |                 |  | (Claude Code)   | |
-                               v                 |  +-----------------+ |
-                         +-----------+           |  | window: website | |
-                         |   State   |           |  | (Gemini CLI)    | |
-                         |   Store   |           |  +-----------------+ |
-                         +-----------+           +----------------------+
+┌─────────────────────────────────────────────────────────────────┐
+│                        Claude Code                               │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │                    MCP Client                            │    │
+│  │  - get_next_task(project="trellm")                      │    │
+│  │  - mark_task_started(card_id)                           │    │
+│  │  - add_comment(card_id, "Claude: Starting...")          │    │
+│  └─────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              │ MCP Protocol (stdio/HTTP)
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      TreLLM MCP Server                          │
+├─────────────────────────────────────────────────────────────────┤
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐         │
+│  │   Trello    │    │    Task     │    │    MCP      │         │
+│  │   Poller    │───▶│    Cache    │◀───│   Handler   │         │
+│  └─────────────┘    └─────────────┘    └─────────────┘         │
+│         │                  │                  │                 │
+│         ▼                  ▼                  ▼                 │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐         │
+│  │   Trello    │    │   State     │    │    Tool     │         │
+│  │    API      │    │   Store     │    │  Handlers   │         │
+│  └─────────────┘    └─────────────┘    └─────────────┘         │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-**Routing Flow:**
-1. New card appears: `trellm add webhook support` (card ID: `abc123`)
-2. TreLLM parses project identifier: `trellm`
-3. TreLLM finds tmux window named `trellm`
-4. TreLLM injects a command with the specific card ID into that window
+**Query Flow:**
+1. User runs `/next` in Claude Code
+2. Claude Code's MCP client calls `get_next_task(project="trellm")`
+3. TreLLM checks local cache for pending tasks
+4. TreLLM returns task details (card_id, name, description, url)
+5. Claude Code calls `mark_task_started(card_id)` and `add_comment(card_id, "Starting...")`
+6. Claude Code works on the task
+7. When done, Claude Code calls `mark_task_complete(card_id)` and `add_comment(card_id, "Done...")`
 
-**Command Injection Approaches:**
+**Why MCP instead of tmux injection?**
 
-| Approach | Command Injected | Pros | Cons |
-|----------|-----------------|------|------|
-| Generic `/next` | `/next` | Simple, AI queries for next card | Race conditions if multiple cards added |
-| Card ID reference | `/card abc123` | Precise, no ambiguity | Requires custom slash command |
-| Direct prompt | `Work on Trello card abc123: add webhook support` | No custom command needed | Longer injection, more complex |
-
-**Recommended approach**: Direct prompt injection with card context, avoiding the need for custom slash commands while providing precise task targeting
+| Aspect | tmux Injection | MCP Server |
+|--------|---------------|------------|
+| Coupling | Tight (requires tmux) | Loose (standard protocol) |
+| Reliability | Fragile (text injection) | Robust (structured API) |
+| Bidirectional | No | Yes (Claude can query) |
+| State sync | External | Integrated |
+| Multi-client | Complex | Native |
+| Testing | Difficult | Easy (mock server) |
 
 ### Technology Options
 
 **Option A: Python**
-- Pros: Simple, quick to develop, good Trello API libraries
+- Pros: Simple, quick to develop, good MCP libraries emerging
 - Cons: Requires Python environment
 
-**Option B: Node.js**
-- Pros: Native async, good for webhook handling
+**Option B: TypeScript/Node.js**
+- Pros: Official MCP SDK support, native async
 - Cons: Larger dependency footprint
 
 **Option C: Go**
-- Pros: Single binary, efficient, good for long-running services
-- Cons: Longer development time
+- Pros: Single binary, efficient
+- Cons: No official MCP SDK yet
 
-**Recommendation**: Start with Python for rapid prototyping, consider Go for production if distribution is important.
+**Recommendation**: TypeScript for best MCP SDK support, or Python for rapid prototyping.
 
 ### Key Dependencies
-- Trello API client library
-- tmux command-line interface (via subprocess)
+- MCP SDK (TypeScript: `@modelcontextprotocol/sdk`, Python: emerging libraries)
+- Trello API client
 - State persistence (SQLite or simple JSON file)
 
 ## Configuration Example
 
 ```yaml
+# ~/.trellm/config.yaml
 trello:
   api_key: ${TRELLO_API_KEY}
   api_token: ${TRELLO_API_TOKEN}
   board_id: "694dd9802e3ad21db9ca5da1"
   todo_list_id: "694dd98f57680df4b26fe1c1"
 
-tmux:
-  session: "main"
-  # Window is determined dynamically from card name prefix
-  # Card "trellm fix bug" -> routes to window "trellm"
-  # Card "myapp add feature" -> routes to window "myapp"
-
 polling:
   interval_seconds: 30
 
-command:
-  # Direct card ID injection (recommended) - avoids race conditions
-  template: |
-    Work on Trello card {card_id}: {task_description}
-
-    Card URL: {card_url}
-
-    {card_description}
-
-  # Alternative: simple /next command (legacy, not recommended)
-  # template: "/next"
-
-  # Alternative: custom slash command with card ID
-  # template: "/card {card_id}"
+mcp:
+  transport: stdio  # or http
+  # http_port: 8765  # if using HTTP transport
 
 state:
   file: "~/.trellm/state.json"
 
 # Optional: Define known projects for validation
-# If not defined, any first word is accepted as a project
 projects:
   - name: "trellm"
     description: "TreLLM automation tool"
@@ -227,39 +228,69 @@ projects:
     description: "My application project"
 ```
 
+## Claude Code Integration
+
+Add TreLLM to Claude Code's MCP configuration:
+
+```json
+// ~/.claude/mcp_servers.json
+{
+  "trellm": {
+    "command": "trellm",
+    "args": ["serve"],
+    "env": {
+      "TRELLO_API_KEY": "...",
+      "TRELLO_API_TOKEN": "..."
+    }
+  }
+}
+```
+
+Then in Claude Code, the `/next` command can use TreLLM tools:
+
+```markdown
+<!-- ~/.claude/commands/next.md -->
+Use the trellm MCP server to get the next task:
+1. Call get_next_task with the current project name
+2. If a task is returned, call mark_task_started
+3. Add an acknowledgment comment
+4. Work on the task
+5. When done, call mark_task_complete and add completion comment
+```
+
 ## Implementation Phases
 
 ### Phase 1: MVP
-- Basic polling of Trello TODO list
-- Parse project identifier from card name (first word)
-- Route commands to matching tmux window
-- **Direct card ID injection** with configurable template (including card ID, name, description, URL)
+- Basic Trello polling with local cache
+- MCP server with stdio transport
+- Core tools: get_next_task, list_tasks, mark_task_started, mark_task_complete, add_comment
 - Simple JSON state file
 - Configuration via environment variables
 
-### Phase 2: Enhanced Configuration
+### Phase 2: Enhanced Features
 - YAML configuration file
-- Command templates with card interpolation
+- HTTP transport option
 - Logging and error handling improvements
+- Card filtering and search
 
 ### Phase 3: Advanced Features
 - Webhook support for real-time notifications
-- Idle detection for AI assistant
-- Multiple session support
+- Push notifications to connected clients
+- Web dashboard
 
 ## Success Metrics
 
-- Tasks are automatically triggered within polling interval
+- Tasks are available to Claude Code within polling interval
 - No duplicate task processing
 - Service runs reliably for days without intervention
-- Setup time under 10 minutes
+- Setup time under 5 minutes (just add MCP server config)
 
 ## Open Questions
 
-1. Should we detect when Claude Code is busy/idle before injecting commands?
-2. ~~Should we support card-specific commands beyond just `/next`?~~ **Resolved**: Yes, direct card ID injection is now the recommended approach
-3. What's the preferred language for the initial implementation?
-4. Should the service run as a systemd service or just in a tmux window?
+1. ~~Should we detect when Claude Code is busy/idle before injecting commands?~~ **Resolved**: With MCP, Claude Code pulls tasks when ready
+2. ~~Should we support card-specific commands beyond just `/next`?~~ **Resolved**: MCP tools provide full flexibility
+3. What's the preferred language for the initial implementation? (TypeScript recommended for MCP SDK support)
+4. Should we support multiple simultaneous Claude Code instances querying the same TreLLM server?
 
 ## Appendix
 
@@ -267,6 +298,6 @@ projects:
 - [Trello API Documentation](https://developer.atlassian.com/cloud/trello/)
 - [Trello Webhooks](https://developer.atlassian.com/cloud/trello/guides/rest-api/webhooks/)
 
-### tmux Command Reference
-- Send keys to session: `tmux send-keys -t session:window "command" Enter`
-- List sessions: `tmux list-sessions`
+### MCP Resources
+- [Model Context Protocol Specification](https://modelcontextprotocol.io/)
+- [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk)
