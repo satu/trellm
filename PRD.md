@@ -2,7 +2,7 @@
 
 ## Overview
 
-TreLLM is an automation tool that bridges Trello boards with AI coding assistants (Claude Code, Gemini CLI). It monitors a Trello board for new TODO items and makes them available to AI assistants, enabling a hands-free workflow for software development.
+TreLLM is an automation tool that bridges Trello boards with AI coding assistants (Claude Code, Gemini CLI). It monitors a Trello board for new TODO items and automatically invokes the AI assistant to work on each task, enabling a fully hands-free workflow for software development.
 
 ## Problem Statement
 
@@ -17,15 +17,24 @@ This manual step breaks the flow and requires constant attention to know when ne
 
 ## Solution
 
-TreLLM eliminates the manual step by acting as an **MCP (Model Context Protocol) server** that Claude Code connects to. When Claude Code needs a task, it queries TreLLM directly:
+TreLLM eliminates the manual step by running as an **orchestrator** that invokes Claude Code as a subprocess for each task:
 
-1. TreLLM runs as a background MCP server
-2. Claude Code connects to TreLLM via MCP
-3. When the user runs `/next`, Claude Code queries TreLLM for the next task
-4. TreLLM returns the task details directly to Claude Code
-5. Claude Code works on the task
+1. TreLLM polls the Trello board for new cards in TODO
+2. When a new card is found, TreLLM invokes Claude Code with the task as a prompt
+3. Claude Code runs in non-interactive mode (`-p` flag) and completes the task
+4. TreLLM uses `--resume` to maintain session state across tasks for the same project
+5. TreLLM moves the card to READY TO TRY when done
 
-**Key insight**: Instead of injecting commands into a terminal (tmux), TreLLM provides tasks via a clean API. The AI assistant pulls tasks when ready, rather than having tasks pushed to it.
+**Key insight**: Claude Code supports session persistence via `--resume <session_id>`. The orchestrator stores the session ID per project and resumes from it, maintaining full development context (files, permissions, working directory) across tasks.
+
+```bash
+# First task for a project
+claude -p "Implement feature from Trello card abc123" --output-format json
+# Parse session_id from JSON output
+
+# Subsequent tasks resume the session
+claude -p "Now work on Trello card def456" --resume <session_id>
+```
 
 ## Card Naming Convention
 
@@ -42,21 +51,21 @@ Cards follow a structured naming format that enables automatic routing to the co
 
 **Key principles:**
 - The first word of the card name is the **project identifier**
-- The project identifier is used by TreLLM to filter tasks for a specific project
-- One Trello board serves all projects, with filtering handled by the AI assistant's project context
-- This allows adding tasks from anywhere (mobile, web) to any project without switching contexts
+- The project identifier maps to a session ID stored by TreLLM
+- One Trello board serves all projects, with routing handled by TreLLM
+- This allows adding tasks from anywhere (mobile, web) to any project
 
 ## User Stories
 
 ### Primary User Story
-As a software engineer using AI coding assistants, I want my Claude Code session to automatically know about new Trello tasks so that I can add tasks from anywhere (mobile, web) and have them processed without manual intervention.
+As a software engineer using AI coding assistants, I want TreLLM to automatically run Claude Code on new Trello tasks so that I can add tasks from anywhere (mobile, web) and have them processed without any manual intervention.
 
 ### Secondary User Stories
 - As a user, I want to configure which Trello board and list to monitor
-- As a user, I want Claude Code to query for tasks relevant to my current project
-- As a user, I want to see logs of what tasks were triggered
-- As a user, I want the system to handle rate limiting gracefully
-- As a user, I want to be able to pause/resume automation without stopping the service
+- As a user, I want TreLLM to maintain session state per project across tasks
+- As a user, I want to see logs of what tasks were processed
+- As a user, I want the system to handle errors gracefully and retry
+- As a user, I want to be able to pause/resume automation
 
 ## Functional Requirements
 
@@ -67,138 +76,157 @@ As a software engineer using AI coding assistants, I want my Claude Code session
 - Support configurable polling interval (default: 30 seconds)
 - Track which cards have already been processed to avoid duplicates
 - Parse the project identifier from the card name (first word)
-- Cache card data locally for fast queries
+- Detect when cards are moved back to TODO (re-process)
 
-#### FR2: MCP Server Interface
-- Implement MCP server protocol for Claude Code integration
-- Provide tools for AI assistants to:
-  - `get_next_task(project)` - Get the next unprocessed task for a project
-  - `list_tasks(project)` - List all pending tasks for a project
-  - `mark_task_started(card_id)` - Mark a task as in-progress
-  - `mark_task_complete(card_id)` - Mark a task as complete (move to READY TO TRY)
-  - `add_comment(card_id, text)` - Add a comment to a card
-- Support filtering by project identifier
+#### FR2: Claude Code Orchestration
+- Invoke Claude Code as a subprocess with `-p` flag for non-interactive mode
+- Use `--output-format json` to parse results and session ID
+- Use `--resume <session_id>` to maintain session state per project
+- Store session IDs in state file, mapped by project name
+- Pass card details (ID, name, description, URL) in the prompt
+- Wait for Claude Code to complete before processing next task
 
-#### FR3: Configuration
+#### FR3: Task Lifecycle Management
+- Add acknowledgment comment when starting a task ("Claude: Starting...")
+- Move card to READY TO TRY list when task completes
+- Add completion comment with summary of what was done
+- Handle errors: log, add error comment, leave in TODO for retry
+
+#### FR4: Configuration
 - YAML or JSON configuration file for settings:
   - Trello API credentials
   - Board ID and TODO list ID
   - Polling interval
-  - MCP server settings (port, auth)
+  - Claude Code binary path
+  - Working directories per project
 - Environment variable support for sensitive credentials
 
-#### FR4: State Management
-- Persist state of processed cards across restarts
-- Track card IDs that have been sent to the AI assistant
-- Handle cards that are moved back to TODO (re-queue based on activity)
-- Sync state with Trello to detect external changes
+#### FR5: State Management
+- Persist state across restarts:
+  - Processed card IDs with timestamps
+  - Session IDs per project
+  - Current task status
+- Handle session expiration gracefully (start new session)
 
 ### Optional Features (Future)
 
-#### FR5: Webhook Support
+#### FR6: Webhook Support
 - Register a Trello webhook for real-time notifications
-- Push notifications to connected Claude Code instances
-- Requires a publicly accessible endpoint (ngrok or similar for local dev)
+- Trigger task processing immediately on card creation
+- Requires a publicly accessible endpoint
 
-#### FR6: Advanced Project Management
-- Optional project validation against a configured list
-- Project-specific configurations
-- Project aliases (e.g., `tl` maps to `trellm`)
+#### FR7: Parallel Projects
+- Process tasks for different projects in parallel
+- Each project maintains its own Claude Code session
+- Configurable concurrency limit
 
-#### FR7: Status Dashboard
-- Simple web UI showing pending and processed tasks
-- Real-time status of connected AI assistants
+#### FR8: Status Dashboard
+- Simple web UI showing task queue and history
+- Real-time status of running Claude Code instances
 
 ## Non-Functional Requirements
 
 ### NFR1: Reliability
-- Graceful handling of network failures and API rate limits
+- Graceful handling of Claude Code failures
 - Automatic retry with exponential backoff
 - No duplicate task processing
+- Session recovery after TreLLM restart
 
 ### NFR2: Resource Efficiency
-- Minimal CPU and memory footprint when idle
-- Efficient API usage to stay within Trello rate limits
-- Local caching to minimize API calls
+- One Claude Code instance per active project (not per task)
+- Efficient Trello API usage to stay within rate limits
+- Clean subprocess management
 
 ### NFR3: Ease of Installation
-- Single binary or simple Python/Node.js package
+- Single binary or simple Python package
 - Clear setup instructions
-- Works as a Claude Code MCP server with minimal configuration
+- Minimal dependencies
 
 ## Technical Architecture
 
 ### Components
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Claude Code                               │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │                    MCP Client                            │    │
-│  │  - get_next_task(project="trellm")                      │    │
-│  │  - mark_task_started(card_id)                           │    │
-│  │  - add_comment(card_id, "Claude: Starting...")          │    │
-│  └─────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              │ MCP Protocol (stdio/HTTP)
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      TreLLM MCP Server                          │
-├─────────────────────────────────────────────────────────────────┤
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐         │
-│  │   Trello    │    │    Task     │    │    MCP      │         │
-│  │   Poller    │───▶│    Cache    │◀───│   Handler   │         │
-│  └─────────────┘    └─────────────┘    └─────────────┘         │
-│         │                  │                  │                 │
-│         ▼                  ▼                  ▼                 │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐         │
-│  │   Trello    │    │   State     │    │    Tool     │         │
-│  │    API      │    │   Store     │    │  Handlers   │         │
-│  └─────────────┘    └─────────────┘    └─────────────┘         │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                            TreLLM Orchestrator                           │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐     │
+│  │  Trello Poller  │    │  Task Dispatcher │    │ Session Manager │     │
+│  │                 │───▶│                 │───▶│                 │     │
+│  │  - Poll cards   │    │  - Parse project│    │  - Store IDs    │     │
+│  │  - Filter new   │    │  - Queue tasks  │    │  - Map projects │     │
+│  └─────────────────┘    └─────────────────┘    └─────────────────┘     │
+│                                  │                      │               │
+│                                  ▼                      ▼               │
+│                         ┌─────────────────────────────────────────┐     │
+│                         │          Claude Code Runner             │     │
+│                         │                                         │     │
+│                         │  claude -p "task" --resume <session_id> │     │
+│                         │  --output-format json                   │     │
+│                         └─────────────────────────────────────────┘     │
+│                                          │                              │
+│                                          ▼                              │
+│                         ┌─────────────────────────────────────────┐     │
+│                         │          Result Handler                 │     │
+│                         │                                         │     │
+│                         │  - Parse JSON output                    │     │
+│                         │  - Update session ID                    │     │
+│                         │  - Move card to READY TO TRY            │     │
+│                         │  - Add completion comment               │     │
+│                         └─────────────────────────────────────────┘     │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                    ┌───────────────┼───────────────┐
+                    ▼               ▼               ▼
+           ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
+           │ Trello API  │  │ Claude Code │  │ State File  │
+           │             │  │ (subprocess)│  │ (JSON)      │
+           └─────────────┘  └─────────────┘  └─────────────┘
 ```
 
-**Query Flow:**
-1. User runs `/next` in Claude Code
-2. Claude Code's MCP client calls `get_next_task(project="trellm")`
-3. TreLLM checks local cache for pending tasks
-4. TreLLM returns task details (card_id, name, description, url)
-5. Claude Code calls `mark_task_started(card_id)` and `add_comment(card_id, "Starting...")`
-6. Claude Code works on the task
-7. When done, Claude Code calls `mark_task_complete(card_id)` and `add_comment(card_id, "Done...")`
+**Task Flow:**
+1. Trello Poller finds new card: `trellm add webhook support` (ID: abc123)
+2. Task Dispatcher parses project: `trellm`
+3. Session Manager retrieves session ID for `trellm` (or null if first task)
+4. Claude Code Runner invokes:
+   ```bash
+   claude -p "Work on Trello card abc123: add webhook support
 
-**Why MCP instead of tmux injection?**
+   Card URL: https://trello.com/c/xxx
 
-| Aspect | tmux Injection | MCP Server |
-|--------|---------------|------------|
-| Coupling | Tight (requires tmux) | Loose (standard protocol) |
-| Reliability | Fragile (text injection) | Robust (structured API) |
-| Bidirectional | No | Yes (Claude can query) |
-| State sync | External | Integrated |
-| Multi-client | Complex | Native |
-| Testing | Difficult | Easy (mock server) |
+   Description: ..." \
+   --resume $SESSION_ID \
+   --output-format json
+   ```
+5. Result Handler:
+   - Parses JSON output for new session_id
+   - Updates session store
+   - Adds comment to card
+   - Moves card to READY TO TRY
 
 ### Technology Options
 
 **Option A: Python**
-- Pros: Simple, quick to develop, good MCP libraries emerging
+- Pros: Simple subprocess handling, good Trello libraries, quick to develop
 - Cons: Requires Python environment
 
-**Option B: TypeScript/Node.js**
-- Pros: Official MCP SDK support, native async
-- Cons: Larger dependency footprint
+**Option B: Go**
+- Pros: Single binary, efficient subprocess management
+- Cons: Longer development time
 
-**Option C: Go**
-- Pros: Single binary, efficient
-- Cons: No official MCP SDK yet
+**Option C: Bash/Shell**
+- Pros: Minimal dependencies, simple for basic use case
+- Cons: Limited error handling, harder to maintain
 
-**Recommendation**: TypeScript for best MCP SDK support, or Python for rapid prototyping.
+**Recommendation**: Python for rapid development and good subprocess/JSON handling.
 
 ### Key Dependencies
-- MCP SDK (TypeScript: `@modelcontextprotocol/sdk`, Python: emerging libraries)
-- Trello API client
-- State persistence (SQLite or simple JSON file)
+- Trello API client (requests or py-trello)
+- subprocess for Claude Code invocation
+- JSON parsing for output
+- State persistence (JSON file)
 
 ## Configuration Example
 
@@ -209,88 +237,88 @@ trello:
   api_token: ${TRELLO_API_TOKEN}
   board_id: "694dd9802e3ad21db9ca5da1"
   todo_list_id: "694dd98f57680df4b26fe1c1"
+  ready_to_try_list_id: "694e7177ae98fb33dc26c3c9"
 
 polling:
   interval_seconds: 30
 
-mcp:
-  transport: stdio  # or http
-  # http_port: 8765  # if using HTTP transport
+claude:
+  binary: "claude"  # or full path
+  output_format: "json"
+  # Working directory per project
+  projects:
+    trellm:
+      working_dir: "~/src/trellm"
+    myapp:
+      working_dir: "~/src/myapp"
 
 state:
   file: "~/.trellm/state.json"
 
-# Optional: Define known projects for validation
-projects:
-  - name: "trellm"
-    description: "TreLLM automation tool"
-  - name: "myapp"
-    description: "My application project"
+logging:
+  level: "INFO"
+  file: "~/.trellm/trellm.log"
 ```
 
-## Claude Code Integration
-
-Add TreLLM to Claude Code's MCP configuration:
+## State File Example
 
 ```json
-// ~/.claude/mcp_servers.json
 {
-  "trellm": {
-    "command": "trellm",
-    "args": ["serve"],
-    "env": {
-      "TRELLO_API_KEY": "...",
-      "TRELLO_API_TOKEN": "..."
+  "sessions": {
+    "trellm": {
+      "session_id": "abc123-def456",
+      "last_activity": "2026-01-07T21:00:00Z"
+    },
+    "myapp": {
+      "session_id": "ghi789-jkl012",
+      "last_activity": "2026-01-07T20:30:00Z"
+    }
+  },
+  "processed_cards": {
+    "card123": {
+      "status": "complete",
+      "processed_at": "2026-01-07T21:00:00Z",
+      "project": "trellm"
     }
   }
 }
 ```
 
-Then in Claude Code, the `/next` command can use TreLLM tools:
-
-```markdown
-<!-- ~/.claude/commands/next.md -->
-Use the trellm MCP server to get the next task:
-1. Call get_next_task with the current project name
-2. If a task is returned, call mark_task_started
-3. Add an acknowledgment comment
-4. Work on the task
-5. When done, call mark_task_complete and add completion comment
-```
-
 ## Implementation Phases
 
 ### Phase 1: MVP
-- Basic Trello polling with local cache
-- MCP server with stdio transport
-- Core tools: get_next_task, list_tasks, mark_task_started, mark_task_complete, add_comment
+- Basic Trello polling
+- Claude Code subprocess invocation with `-p` flag
+- Session resumption with `--resume`
 - Simple JSON state file
-- Configuration via environment variables
+- Move cards to READY TO TRY on completion
+- Add comments to cards
 
 ### Phase 2: Enhanced Features
 - YAML configuration file
-- HTTP transport option
-- Logging and error handling improvements
-- Card filtering and search
+- Working directory per project
+- Error handling and retry logic
+- Logging
 
 ### Phase 3: Advanced Features
-- Webhook support for real-time notifications
-- Push notifications to connected clients
+- Trello webhooks for real-time triggering
+- Parallel project processing
 - Web dashboard
 
 ## Success Metrics
 
-- Tasks are available to Claude Code within polling interval
+- Tasks are automatically processed within polling interval
+- Session state is maintained across tasks for same project
 - No duplicate task processing
 - Service runs reliably for days without intervention
-- Setup time under 5 minutes (just add MCP server config)
+- Zero manual terminal interaction required
 
 ## Open Questions
 
-1. ~~Should we detect when Claude Code is busy/idle before injecting commands?~~ **Resolved**: With MCP, Claude Code pulls tasks when ready
-2. ~~Should we support card-specific commands beyond just `/next`?~~ **Resolved**: MCP tools provide full flexibility
-3. What's the preferred language for the initial implementation? (TypeScript recommended for MCP SDK support)
-4. Should we support multiple simultaneous Claude Code instances querying the same TreLLM server?
+1. How long do Claude Code sessions persist? Do we need to handle expiration?
+2. Should we support multiple tasks in a single Claude Code invocation?
+3. What's the best way to handle Claude Code failures mid-task?
+4. Should we capture and store Claude Code's stdout for debugging?
 
 ## Appendix
 
@@ -298,6 +326,8 @@ Use the trellm MCP server to get the next task:
 - [Trello API Documentation](https://developer.atlassian.com/cloud/trello/)
 - [Trello Webhooks](https://developer.atlassian.com/cloud/trello/guides/rest-api/webhooks/)
 
-### MCP Resources
-- [Model Context Protocol Specification](https://modelcontextprotocol.io/)
-- [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk)
+### Claude Code CLI Reference
+- `-p, --prompt`: Run in non-interactive mode with given prompt
+- `--resume <session_id>`: Resume from a previous session
+- `--output-format json`: Output structured JSON including session_id
+- `--continue`: Continue the most recent conversation (alternative to --resume)
