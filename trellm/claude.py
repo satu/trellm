@@ -59,8 +59,11 @@ class ClaudeRunner:
             "-p",
             prompt,
             "--output-format",
-            "json",
+            "stream-json" if self.verbose else "json",
         ]
+
+        if self.verbose:
+            cmd.append("--verbose")
 
         if self.yolo:
             cmd.append("--dangerously-skip-permissions")
@@ -88,25 +91,35 @@ class ClaudeRunner:
         try:
             if self.verbose:
                 # Stream output to terminal while also capturing it
+                # In verbose mode, we use stream-json and extract human-readable content
                 stdout_lines: list[str] = []
                 stderr_lines: list[str] = []
 
-                async def read_stream(
-                    stream: asyncio.StreamReader, lines: list[str], print_output: bool
-                ) -> None:
+                async def read_stdout_stream(stream: asyncio.StreamReader) -> None:
+                    """Read stdout and print human-readable content from JSON."""
                     while True:
                         line = await stream.readline()
                         if not line:
                             break
                         decoded = line.decode()
-                        lines.append(decoded)
-                        if print_output:
-                            print(decoded, end="", flush=True)
+                        stdout_lines.append(decoded)
+                        # Parse JSON and extract human-readable content
+                        self._print_stream_json_line(decoded)
+
+                async def read_stderr_stream(stream: asyncio.StreamReader) -> None:
+                    """Read stderr and print it directly."""
+                    while True:
+                        line = await stream.readline()
+                        if not line:
+                            break
+                        decoded = line.decode()
+                        stderr_lines.append(decoded)
+                        print(decoded, end="", flush=True)
 
                 await asyncio.wait_for(
                     asyncio.gather(
-                        read_stream(proc.stdout, stdout_lines, True),  # type: ignore[arg-type]
-                        read_stream(proc.stderr, stderr_lines, True),  # type: ignore[arg-type]
+                        read_stdout_stream(proc.stdout),  # type: ignore[arg-type]
+                        read_stderr_stream(proc.stderr),  # type: ignore[arg-type]
                     ),
                     timeout=self.timeout,
                 )
@@ -133,6 +146,49 @@ class ClaudeRunner:
 
         # Parse JSON output
         return self._parse_output(output)
+
+    def _print_stream_json_line(self, line: str) -> None:
+        """Parse a stream-json line and print human-readable content."""
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            return
+
+        try:
+            data = json.loads(line)
+            msg_type = data.get("type")
+
+            if msg_type == "assistant":
+                # Extract text content from assistant messages
+                message = data.get("message", {})
+                content = message.get("content", [])
+                for item in content:
+                    if item.get("type") == "text":
+                        text = item.get("text", "")
+                        if text:
+                            print(f"\n[Claude] {text}", flush=True)
+                    elif item.get("type") == "tool_use":
+                        tool_name = item.get("name", "unknown")
+                        print(f"\n[Tool: {tool_name}]", flush=True)
+
+            elif msg_type == "user":
+                # Tool results or user messages
+                content = data.get("message", {}).get("content", [])
+                for item in content:
+                    if item.get("type") == "tool_result":
+                        # Don't print full tool results, just indicate completion
+                        tool_use_id = item.get("tool_use_id", "")[:8]
+                        is_error = item.get("is_error", False)
+                        status = "error" if is_error else "done"
+                        print(f"  [{status}]", flush=True)
+
+            elif msg_type == "result":
+                # Final result
+                result = data.get("result", "")
+                if result:
+                    print(f"\n[Result] {result[:200]}...", flush=True)
+
+        except json.JSONDecodeError:
+            pass
 
     def _build_prompt(self, card: TrelloCard) -> str:
         """Build the prompt for Claude Code."""
