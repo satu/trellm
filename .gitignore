@@ -6,6 +6,10 @@ firebase-debug.log
 state.json
 .trellm/
 
+# Config files (may contain secrets)
+config.yaml
+config.yml
+
 # Environment files
 .env
 .env.local

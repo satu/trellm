@@ -1,0 +1,34 @@
+# TreLLM Configuration Example
+# Copy this file to ~/.trellm/config.yaml and fill in your values
+
+trello:
+  # Get your API key from: https://trello.com/app-key
+  api_key: "your-api-key"
+  # Generate a token from the same page (click "Token" link)
+  api_token: "your-api-token"
+  # Board and list IDs can be found in the URL when viewing a board/list
+  board_id: "your-board-id"
+  todo_list_id: "your-todo-list-id"
+  # Optional: specify the READY TO TRY list ID (auto-discovered if not set)
+  # ready_to_try_list_id: "your-ready-list-id"
+
+polling:
+  # How often to check for new cards (in seconds)
+  interval_seconds: 5
+
+claude:
+  # Path to Claude Code binary (default: "claude")
+  binary: "claude"
+  # Timeout for Claude Code execution (in seconds)
+  timeout: 600
+  # Per-project configuration
+  projects:
+    # Project name matches first word of card name
+    myproject:
+      working_dir: "~/src/myproject"
+      # Optional: resume an existing Claude Code session
+      # session_id: "existing-session-id"
+
+state:
+  # Where to store session IDs and processed card tracking
+  file: "~/.trellm/state.json"
