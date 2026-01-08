@@ -627,21 +627,400 @@ trellm
 
 ## Comparison Matrix
 
-| Criteria | Subprocess + Resume (Recommended) | MCP Server | tmux Injection | File Queue |
-|----------|----------------------------------|------------|----------------|------------|
-| Manual intervention | None | Yes (/next) | None | None |
-| Session persistence | Native (--resume) | External | N/A | External |
-| Complexity | Low | Medium | Low | Medium |
-| Dependencies | Claude CLI | MCP SDK | tmux | None |
-| Reliability | High | High | Low | Medium |
-| Debugging | Easy (logs) | Easy | Hard | Easy |
-| Terminal required | No | Yes | Yes | No |
+| Criteria | Subprocess + Polling | Subprocess + Webhook | MCP Server | tmux Injection |
+|----------|---------------------|---------------------|------------|----------------|
+| Manual intervention | None | None | Yes (/next) | None |
+| Latency | 0-30 seconds | <1 second | Immediate | 0-30 seconds |
+| Session persistence | Native (--resume) | Native (--resume) | External | N/A |
+| Complexity | Low | Medium | Medium | Low |
+| Dependencies | Claude CLI | Claude CLI + Firebase | MCP SDK | tmux |
+| Reliability | High | High | High | Low |
+| Debugging | Easy (logs) | Easy (logs + Firestore) | Easy | Hard |
+| Terminal required | No | No | Yes | Yes |
+| Cloud cost | None | Free tier OK | None | None |
+
+---
+
+## Webhook Proxy Architecture (Low Latency Option)
+
+The polling approach works but has inherent latency (up to 30 seconds by default). For near-instant task pickup, we can use **Trello webhooks** with a **Firebase Cloud Functions proxy**.
+
+### Challenge
+
+- TreLLM runs on a dev machine behind NAT
+- Trello webhooks require a publicly accessible HTTPS endpoint
+- We don't want to expose the dev machine directly to the internet
+
+### Solution: Firebase as Webhook Proxy
+
+Firebase Cloud Functions provides a serverless, publicly accessible endpoint that:
+1. Receives Trello webhook notifications
+2. Stores them in Firestore as a queue
+3. TreLLM polls Firestore (much faster than Trello API)
+
+Alternatively, TreLLM can use **Firestore real-time listeners** for true push notifications.
+
+### Architecture
+
+```
+┌───────────────────────────────────────────────────────────────────────────────┐
+│                              Cloud (Firebase)                                  │
+│  ┌─────────────────────────────────────────────────────────────────────────┐  │
+│  │                        Cloud Function                                    │  │
+│  │                                                                          │  │
+│  │   POST /webhook                                                          │  │
+│  │   ├── Verify Trello webhook signature                                   │  │
+│  │   ├── Parse card event (create, update, moveToList)                     │  │
+│  │   └── Write to Firestore: /tasks/{card_id}                              │  │
+│  └─────────────────────────────────────────────────────────────────────────┘  │
+│                                     │                                          │
+│                                     ▼                                          │
+│  ┌─────────────────────────────────────────────────────────────────────────┐  │
+│  │                          Firestore                                       │  │
+│  │                                                                          │  │
+│  │   /tasks/{card_id}                                                       │  │
+│  │   {                                                                      │  │
+│  │     "card_id": "abc123",                                                 │  │
+│  │     "card_name": "trellm add feature",                                   │  │
+│  │     "action": "moveToList",                                              │  │
+│  │     "list_name": "TODO",                                                 │  │
+│  │     "timestamp": "2026-01-08T...",                                       │  │
+│  │     "processed": false                                                   │  │
+│  │   }                                                                      │  │
+│  └─────────────────────────────────────────────────────────────────────────┘  │
+│                                     │                                          │
+└─────────────────────────────────────│──────────────────────────────────────────┘
+                                      │ Real-time listener / polling
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                            Dev Machine (behind NAT)                              │
+│                                                                                  │
+│  ┌───────────────────────────────────────────────────────────────────────────┐  │
+│  │                           TreLLM Orchestrator                              │  │
+│  │                                                                            │  │
+│  │   Firestore Listener (real-time)                                          │  │
+│  │   ├── on_snapshot(/tasks where processed == false)                        │  │
+│  │   └── process_task(card) → Claude Code subprocess                         │  │
+│  └───────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Implementation
+
+#### 1. Firebase Cloud Function (Webhook Receiver)
+
+```typescript
+// functions/src/index.ts
+import * as functions from "firebase-functions";
+import * as admin from "firebase-admin";
+import * as crypto from "crypto";
+
+admin.initializeApp();
+const db = admin.firestore();
+
+// Trello webhook secret (from environment)
+const TRELLO_SECRET = functions.config().trello.webhook_secret;
+
+function verifyTrelloWebhook(
+  payload: string,
+  signature: string,
+  callbackURL: string
+): boolean {
+  const base64Digest = crypto
+    .createHmac("sha1", TRELLO_SECRET)
+    .update(payload + callbackURL)
+    .digest("base64");
+  return base64Digest === signature;
+}
+
+export const trelloWebhook = functions.https.onRequest(async (req, res) => {
+  // HEAD request = Trello webhook verification
+  if (req.method === "HEAD") {
+    res.status(200).send();
+    return;
+  }
+
+  // Verify signature
+  const signature = req.headers["x-trello-webhook"] as string;
+  const callbackURL = `https://${req.hostname}${req.path}`;
+
+  if (!verifyTrelloWebhook(JSON.stringify(req.body), signature, callbackURL)) {
+    res.status(401).send("Invalid signature");
+    return;
+  }
+
+  const { action, model } = req.body;
+
+  // Only process card events for TODO list
+  if (action.type === "updateCard" && action.data.listAfter) {
+    const listName = action.data.listAfter.name;
+    if (listName === "TODO") {
+      await db.collection("tasks").doc(model.id).set({
+        card_id: model.id,
+        card_name: model.name,
+        card_url: model.url,
+        card_desc: model.desc || "",
+        action: "moveToList",
+        list_name: listName,
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+        processed: false,
+      });
+    }
+  } else if (action.type === "createCard") {
+    const listName = action.data.list?.name;
+    if (listName === "TODO") {
+      await db.collection("tasks").doc(action.data.card.id).set({
+        card_id: action.data.card.id,
+        card_name: action.data.card.name,
+        card_url: `https://trello.com/c/${action.data.card.shortLink}`,
+        card_desc: action.data.card.desc || "",
+        action: "createCard",
+        list_name: listName,
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+        processed: false,
+      });
+    }
+  }
+
+  res.status(200).send("OK");
+});
+```
+
+#### 2. TreLLM with Firestore Listener
+
+```python
+# trellm/firebase_listener.py
+
+import asyncio
+import logging
+from google.cloud import firestore
+from .claude import ClaudeRunner
+from .state import StateManager
+from .config import load_config
+
+logger = logging.getLogger(__name__)
+
+
+class FirestoreTaskListener:
+    def __init__(self, config):
+        self.db = firestore.Client()
+        self.config = config
+        self.state = StateManager(config.state_file)
+        self.claude = ClaudeRunner(config.claude)
+        self._callback = None
+
+    def start(self):
+        """Start listening for new tasks in Firestore."""
+        tasks_ref = self.db.collection("tasks")
+        query = tasks_ref.where("processed", "==", False)
+
+        # Real-time listener
+        self._callback = query.on_snapshot(self._on_snapshot)
+        logger.info("Listening for tasks on Firestore...")
+
+    def stop(self):
+        """Stop the listener."""
+        if self._callback:
+            self._callback.unsubscribe()
+
+    def _on_snapshot(self, doc_snapshot, changes, read_time):
+        """Handle new/changed documents."""
+        for change in changes:
+            if change.type.name == "ADDED":
+                doc = change.document
+                asyncio.create_task(self._process_task(doc))
+
+    async def _process_task(self, doc):
+        """Process a single task from Firestore."""
+        data = doc.to_dict()
+        card_id = data["card_id"]
+
+        logger.info("New task from webhook: %s", data["card_name"])
+
+        # Create a card-like object
+        class Card:
+            def __init__(self, d):
+                self.id = d["card_id"]
+                self.name = d["card_name"]
+                self.url = d["card_url"]
+                self.description = d.get("card_desc", "")
+                self.last_activity = str(d.get("timestamp", ""))
+
+        card = Card(data)
+        project = card.name.split()[0].lower()
+        session_id = self.state.get_session(project)
+
+        try:
+            result = await self.claude.run(
+                card=card,
+                project=project,
+                session_id=session_id,
+                working_dir=self.config.get_working_dir(project)
+            )
+
+            if result.session_id:
+                self.state.set_session(project, result.session_id)
+
+            self.state.mark_processed(card.id)
+
+            # Mark as processed in Firestore
+            doc.reference.update({"processed": True})
+
+            logger.info("Completed task: %s", card.name)
+
+        except Exception as e:
+            logger.error("Failed to process task %s: %s", card.name, e)
+
+
+async def main():
+    config = load_config()
+    listener = FirestoreTaskListener(config)
+    listener.start()
+
+    # Keep running
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        listener.stop()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+#### 3. Hybrid Mode (Main Entry Point)
+
+```python
+# trellm/__main__.py (updated)
+
+import asyncio
+import logging
+from .config import load_config
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+async def main():
+    config = load_config()
+
+    if config.use_firebase_webhooks:
+        # Real-time mode via Firebase
+        from .firebase_listener import FirestoreTaskListener
+        listener = FirestoreTaskListener(config)
+        listener.start()
+        logger.info("TreLLM started in webhook mode (Firebase)")
+
+        try:
+            while True:
+                await asyncio.sleep(1)
+        except KeyboardInterrupt:
+            listener.stop()
+    else:
+        # Polling mode (original)
+        from .trello import TrelloClient
+        from .state import StateManager
+        from .claude import ClaudeRunner
+
+        trello = TrelloClient(config.trello)
+        state = StateManager(config.state_file)
+        claude = ClaudeRunner(config.claude)
+
+        logger.info("TreLLM started in polling mode (every %ds)", config.poll_interval)
+
+        while True:
+            # ... original polling logic ...
+            await asyncio.sleep(config.poll_interval)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+### Setup Instructions
+
+#### 1. Deploy Firebase Function
+
+```bash
+# Install Firebase CLI
+npm install -g firebase-tools
+
+# Initialize Firebase project
+firebase login
+firebase init functions
+
+# Deploy the webhook function
+cd functions
+npm install
+firebase deploy --only functions
+
+# Note the function URL (e.g., https://us-central1-myproject.cloudfunctions.net/trelloWebhook)
+```
+
+#### 2. Register Trello Webhook
+
+```bash
+# Create webhook pointing to your Cloud Function
+curl -X POST "https://api.trello.com/1/webhooks" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "key": "'$TRELLO_API_KEY'",
+    "token": "'$TRELLO_API_TOKEN'",
+    "callbackURL": "https://us-central1-myproject.cloudfunctions.net/trelloWebhook",
+    "idModel": "'$TRELLO_BOARD_ID'",
+    "description": "TreLLM webhook"
+  }'
+```
+
+#### 3. Configure TreLLM for Firebase Mode
+
+```yaml
+# ~/.trellm/config.yaml
+firebase:
+  enabled: true
+  project_id: "your-project-id"
+  credentials: "~/.trellm/firebase-credentials.json"
+
+# Polling is still available as fallback
+polling:
+  enabled: false  # Disable when using webhooks
+  interval_seconds: 30
+```
+
+### Latency Comparison
+
+| Mode | Latency | API Calls |
+|------|---------|-----------|
+| Polling (30s) | 0-30 seconds | 2/min to Trello |
+| Polling (5s) | 0-5 seconds | 12/min to Trello |
+| Firebase Webhook | <1 second | 0 to Trello (webhook pushes) |
+
+### Benefits of Firebase Proxy
+
+1. **Near-instant latency**: Tasks picked up within 1 second of card creation
+2. **No NAT traversal needed**: Dev machine initiates outbound connection
+3. **Reduced API calls**: No polling Trello API
+4. **Free tier friendly**: Firebase free tier handles typical usage
+5. **Reliable**: Firebase handles retries and persistence
+6. **Audit trail**: Firestore stores all task events
+
+### Alternative: Cloud Pub/Sub
+
+For Google Cloud users, Cloud Pub/Sub with push subscriptions is another option:
+
+```
+Trello → Cloud Function → Pub/Sub → Push to Cloud Run → TreLLM
+```
+
+However, this still requires a publicly accessible endpoint for the push delivery. Firebase's client library with real-time listeners is simpler for the "dev machine behind NAT" scenario.
 
 ---
 
 ## Implementation Roadmap
 
-### Phase 1: MVP (Week 1)
+### Phase 1: MVP (Polling Mode)
 - [x] Project skeleton with pyproject.toml
 - [ ] Trello client with async API calls
 - [ ] Claude runner with subprocess
@@ -649,14 +1028,21 @@ trellm
 - [ ] Main polling loop
 - [ ] Comments and card movement
 
-### Phase 2: Enhanced Features (Week 2)
+### Phase 2: Enhanced Features
 - [ ] YAML configuration file
 - [ ] Working directory per project
 - [ ] Session resumption with --resume
 - [ ] Error handling and retry logic
 - [ ] Logging to file
 
-### Phase 3: Polish (Week 3)
+### Phase 3: Webhook Mode (Low Latency)
+- [ ] Firebase project setup
+- [ ] Cloud Function for Trello webhook
+- [ ] Firestore task queue
+- [ ] TreLLM Firestore listener
+- [ ] Hybrid mode (polling + webhook)
+
+### Phase 4: Polish
 - [ ] PyPI package publishing
 - [ ] Documentation
 - [ ] Integration tests
@@ -666,7 +1052,21 @@ trellm
 
 ## Decision
 
-**I recommend the Subprocess + Resume approach** because:
+**I recommend the Subprocess + Resume approach** with two modes:
+
+### Polling Mode (Simple, No Cloud)
+- Start here for quick setup
+- Zero cloud dependencies
+- 0-30 second latency (configurable)
+- Good for most use cases
+
+### Webhook Mode (Low Latency, Requires Firebase)
+- Sub-second task pickup latency
+- Requires Firebase project (free tier is sufficient)
+- Best for when you want instant response to Trello cards
+- Dev machine stays behind NAT (no port forwarding needed)
+
+**Core benefits of both modes:**
 
 1. **Zero Manual Intervention**: TreLLM runs Claude Code directly - no terminal needed
 2. **Session Persistence**: `--resume` maintains context across tasks automatically
