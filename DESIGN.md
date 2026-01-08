@@ -115,8 +115,11 @@ async def process_cards(trello, state, claude, config):
             f"Claude: Starting work on this task..."
         )
 
-        # Get session ID for this project (if exists)
+        # Get session ID for this project
+        # Priority: 1) state file (from previous runs), 2) config file (initial setup)
         session_id = state.get_session(project)
+        if not session_id:
+            session_id = config.get_initial_session_id(project)
 
         # Run Claude Code
         try:
@@ -454,6 +457,11 @@ class Config:
         proj = self.projects.get(project, {})
         return proj.get("working_dir")
 
+    def get_initial_session_id(self, project: str) -> Optional[str]:
+        """Get initial session ID for a project (from config file)."""
+        proj = self.projects.get(project, {})
+        return proj.get("session_id")
+
 
 def load_config() -> Config:
     """Load configuration from file and environment."""
@@ -524,6 +532,8 @@ claude:
   projects:
     trellm:
       working_dir: ~/src/trellm
+      # Optional: resume an existing Claude Code session
+      # session_id: "9fddcb43-1605-4b58-a672-c9be2937683a"
 EOF
 
 # Run

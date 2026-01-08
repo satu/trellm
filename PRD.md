@@ -107,6 +107,8 @@ As a software engineer using AI coding assistants, I want TreLLM to automaticall
   - Session IDs per project
   - Current task status
 - Handle session expiration gracefully (start new session)
+- Support initial session_id in config file for resuming existing sessions
+  - Priority: state file > config file (state file takes precedence once populated)
 
 ### Optional Features (Future)
 
@@ -249,6 +251,8 @@ claude:
   projects:
     trellm:
       working_dir: "~/src/trellm"
+      # Optional: resume an existing Claude Code session
+      # session_id: "9fddcb43-1605-4b58-a672-c9be2937683a"
     myapp:
       working_dir: "~/src/myapp"
 
