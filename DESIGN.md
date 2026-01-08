@@ -9,6 +9,8 @@ This document presents the technical design for TreLLM, a bridge between Trello 
 - MCP server complexity
 - Any manual terminal interaction
 
+**Why polling is good enough**: Trello's API allows 300 requests per 10 seconds. With 5-second polling intervals, TreLLM uses only ~12 requests/minute—well within limits. This provides 0-5 second latency without the complexity of webhooks.
+
 ---
 
 ## Recommended Approach: Python Subprocess Orchestrator
@@ -473,7 +475,7 @@ def load_config() -> Config:
     return Config(
         trello=trello,
         claude=data.get("claude", {}),
-        poll_interval=data.get("polling", {}).get("interval_seconds", 30),
+        poll_interval=data.get("polling", {}).get("interval_seconds", 5),
         state_file=data.get("state", {}).get("file", "~/.trellm/state.json"),
         projects=data.get("claude", {}).get("projects", {})
     )
@@ -627,23 +629,24 @@ trellm
 
 ## Comparison Matrix
 
-| Criteria | Subprocess + Polling | Subprocess + Webhook | MCP Server | tmux Injection |
-|----------|---------------------|---------------------|------------|----------------|
+| Criteria | Polling (Recommended) | Webhook (Optional) | MCP Server | tmux Injection |
+|----------|----------------------|-------------------|------------|----------------|
 | Manual intervention | None | None | Yes (/next) | None |
-| Latency | 0-30 seconds | <1 second | Immediate | 0-30 seconds |
+| Latency | 0-5 seconds | <1 second | Immediate | 0-30 seconds |
 | Session persistence | Native (--resume) | Native (--resume) | External | N/A |
-| Complexity | Low | Medium | Medium | Low |
+| Complexity | **Low** | Medium | Medium | Low |
 | Dependencies | Claude CLI | Claude CLI + Firebase | MCP SDK | tmux |
 | Reliability | High | High | High | Low |
 | Debugging | Easy (logs) | Easy (logs + Firestore) | Easy | Hard |
 | Terminal required | No | No | Yes | Yes |
-| Cloud cost | None | Free tier OK | None | None |
+| Cloud cost | **None** | Free tier OK | None | None |
+| API usage | 12 req/min (limit: 1800) | 0 | 0 | 12 req/min |
 
 ---
 
-## Webhook Proxy Architecture (Low Latency Option)
+## Webhook Proxy Architecture (Optional Future Enhancement)
 
-The polling approach works but has inherent latency (up to 30 seconds by default). For near-instant task pickup, we can use **Trello webhooks** with a **Firebase Cloud Functions proxy**.
+The 5-second polling approach provides excellent latency for most use cases. However, if sub-second latency is ever needed, webhooks with a **Firebase Cloud Functions proxy** are an option.
 
 ### Challenge
 
@@ -986,16 +989,18 @@ firebase:
 # Polling is still available as fallback
 polling:
   enabled: false  # Disable when using webhooks
-  interval_seconds: 30
+  interval_seconds: 5
 ```
 
 ### Latency Comparison
 
-| Mode | Latency | API Calls |
-|------|---------|-----------|
-| Polling (30s) | 0-30 seconds | 2/min to Trello |
-| Polling (5s) | 0-5 seconds | 12/min to Trello |
-| Firebase Webhook | <1 second | 0 to Trello (webhook pushes) |
+| Mode | Latency | API Calls | Complexity |
+|------|---------|-----------|------------|
+| **Polling (5s)** | **0-5 seconds** | **12/min** | **Low (recommended)** |
+| Polling (30s) | 0-30 seconds | 2/min | Low |
+| Firebase Webhook | <1 second | 0 | Medium |
+
+**Note**: Trello allows 300 requests/10 seconds (1800/minute). 5-second polling uses <1% of the limit.
 
 ### Benefits of Firebase Proxy
 
@@ -1052,21 +1057,23 @@ However, this still requires a publicly accessible endpoint for the push deliver
 
 ## Decision
 
-**I recommend the Subprocess + Resume approach** with two modes:
+**I recommend the Subprocess + Resume approach with 5-second polling.**
 
-### Polling Mode (Simple, No Cloud)
-- Start here for quick setup
-- Zero cloud dependencies
-- 0-30 second latency (configurable)
-- Good for most use cases
+### Why Polling Wins
 
-### Webhook Mode (Low Latency, Requires Firebase)
-- Sub-second task pickup latency
-- Requires Firebase project (free tier is sufficient)
-- Best for when you want instant response to Trello cards
-- Dev machine stays behind NAT (no port forwarding needed)
+Trello's generous rate limits (300 requests/10 seconds) make polling the clear winner:
+- **5-second latency** is fast enough for task automation
+- **Zero cloud dependencies** - no Firebase, no webhooks to maintain
+- **Simple to debug** - just logs, no distributed systems
+- **Free** - no cloud costs whatsoever
 
-**Core benefits of both modes:**
+### Webhook Mode (Optional Future Enhancement)
+If sub-second latency is ever needed:
+- Firebase proxy architecture is documented above
+- Dev machine stays behind NAT (no port forwarding)
+- Only adds ~1 second improvement over 5s polling
+
+**Core benefits:**
 
 1. **Zero Manual Intervention**: TreLLM runs Claude Code directly - no terminal needed
 2. **Session Persistence**: `--resume` maintains context across tasks automatically

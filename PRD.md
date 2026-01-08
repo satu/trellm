@@ -73,7 +73,7 @@ As a software engineer using AI coding assistants, I want TreLLM to automaticall
 
 #### FR1: Trello Board Monitoring
 - Poll the configured Trello board for new cards in the TODO list
-- Support configurable polling interval (default: 30 seconds)
+- Support configurable polling interval (default: 5 seconds)
 - Track which cards have already been processed to avoid duplicates
 - Parse the project identifier from the card name (first word)
 - Detect when cards are moved back to TODO (re-process)
@@ -240,7 +240,7 @@ trello:
   ready_to_try_list_id: "694e7177ae98fb33dc26c3c9"
 
 polling:
-  interval_seconds: 30
+  interval_seconds: 5  # Trello allows 300 req/10s, so 5s polling is safe
 
 claude:
   binary: "claude"  # or full path
