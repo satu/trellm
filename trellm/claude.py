@@ -136,30 +136,22 @@ class ClaudeRunner:
 
     def _build_prompt(self, card: TrelloCard) -> str:
         """Build the prompt for Claude Code."""
-        parts = [
-            f"Work on Trello card {card.id}: {card.name}",
-            "",
-            f"Card URL: {card.url}",
-        ]
+        return f"""Work on Trello card {card.id}: {card.name}
 
-        if card.description:
-            parts.extend(["", "Description:", card.description])
+Card URL: {card.url}
 
-        parts.extend(
-            [
-                "",
-                "When done, commit your changes and provide a brief summary.",
-                "",
-                "Important guidelines:",
-                "- Read and understand existing code before making changes",
-                "- Write clean, maintainable code following the project's style",
-                "- Add tests when appropriate",
-                "- Commit with a clear, descriptive message",
-                "- Push your changes to the remote repository",
-            ]
-        )
+When done, commit your changes and provide a brief summary.
 
-        return "\n".join(parts)
+Important guidelines:
+- Fetch the card details from Trello to get the full description and requirements
+- Check ALL comments on the card - if there are comments after your last "Claude:" comment, those contain feedback you need to address (the card was moved back to TODO)
+- As soon as you start working, add a comment starting with "Claude:" acknowledging you've started
+- Read and understand existing code before making changes
+- Write clean, maintainable code following the project's style
+- Add tests when appropriate
+- Commit with a clear, descriptive message
+- Push your changes to the remote repository
+- When done, add a comment starting with "Claude:" summarizing what was done"""
 
     def _parse_output(self, output: str) -> ClaudeResult:
         """Parse Claude Code's JSON output.
