@@ -36,7 +36,7 @@ async def process_cards(
     Returns the number of cards processed.
     """
     cards = await trello.get_todo_cards()
-    logger.info("Found %d cards in TODO", len(cards))
+    logger.debug("Found %d cards in TODO", len(cards))
 
     processed_count = 0
 
@@ -134,12 +134,15 @@ def main() -> None:
     parser.add_argument(
         "-v",
         "--verbose",
-        action="store_true",
-        help="Enable verbose logging",
+        action="count",
+        default=0,
+        help="Verbose output: -v shows Claude conversation, -vv adds debug logging",
     )
     args = parser.parse_args()
 
-    if args.verbose:
+    # -vv enables DEBUG logging (includes poll cycles)
+    # -v just shows Claude conversation but keeps INFO logging
+    if args.verbose >= 2:
         logging.getLogger().setLevel(logging.DEBUG)
 
     # Load config
@@ -167,11 +170,13 @@ def main() -> None:
         sys.exit(1)
 
     # Run
+    # verbose >= 1 enables Claude conversation streaming
+    show_claude_output = args.verbose >= 1
     if args.once:
-        count = asyncio.run(run_once(config, verbose=args.verbose))
+        count = asyncio.run(run_once(config, verbose=show_claude_output))
         logger.info("Processed %d cards", count)
     else:
-        asyncio.run(run_polling_loop(config, verbose=args.verbose))
+        asyncio.run(run_polling_loop(config, verbose=show_claude_output))
 
 
 if __name__ == "__main__":
