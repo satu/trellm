@@ -87,10 +87,9 @@ As a software engineer using AI coding assistants, I want TreLLM to automaticall
 - Wait for Claude Code to complete before processing next task
 
 #### FR3: Task Lifecycle Management
-- Add acknowledgment comment when starting a task ("Claude: Starting...")
 - Move card to READY TO TRY list when task completes
-- Add completion comment with summary of what was done
-- Handle errors: log, add error comment, leave in TODO for retry
+- Handle errors: log and leave in TODO for retry
+- Note: Claude Code (the agent) handles adding comments to cards via its /next workflow
 
 #### FR4: Configuration
 - YAML or JSON configuration file for settings:
@@ -175,7 +174,6 @@ As a software engineer using AI coding assistants, I want TreLLM to automaticall
 │                         │  - Parse JSON output                    │     │
 │                         │  - Update session ID                    │     │
 │                         │  - Move card to READY TO TRY            │     │
-│                         │  - Add completion comment               │     │
 │                         └─────────────────────────────────────────┘     │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -205,7 +203,6 @@ As a software engineer using AI coding assistants, I want TreLLM to automaticall
 5. Result Handler:
    - Parses JSON output for new session_id
    - Updates session store
-   - Adds comment to card
    - Moves card to READY TO TRY
 
 ### Technology Options
@@ -296,7 +293,6 @@ logging:
 - Session resumption with `--resume`
 - Simple JSON state file
 - Move cards to READY TO TRY on completion
-- Add comments to cards
 
 ### Phase 2: Enhanced Features
 - YAML configuration file

@@ -102,18 +102,12 @@ async def process_cards(trello, state, claude, config):
         if state.is_processed(card.id):
             continue
 
-        # Check if card was moved back (has our comment but back in TODO)
+        # Check if card was moved back to TODO
         if state.should_reprocess(card.id, card.last_activity):
             logger.info("Card %s moved back to TODO, reprocessing", card.id)
 
         project = parse_project(card.name)
         logger.info("Processing card %s for project %s", card.id, project)
-
-        # Add acknowledgment comment
-        await trello.add_comment(
-            card.id,
-            f"Claude: Starting work on this task..."
-        )
 
         # Get session ID for this project
         # Priority: 1) state file (from previous runs), 2) config file (initial setup)
@@ -137,18 +131,11 @@ async def process_cards(trello, state, claude, config):
             # Mark as processed and move card
             state.mark_processed(card.id)
             await trello.move_to_ready(card.id)
-            await trello.add_comment(
-                card.id,
-                f"Claude: Task completed.\n\n{result.summary}"
-            )
             logger.info("Completed card %s", card.id)
 
         except Exception as e:
             logger.error("Failed to process card %s: %s", card.id, e)
-            await trello.add_comment(
-                card.id,
-                f"Claude: Error processing task: {e}"
-            )
+            # Leave card in TODO for retry; Claude Code handles comments
 
 
 def parse_project(card_name: str) -> str:
@@ -405,14 +392,6 @@ class TrelloClient:
             )
             for c in data
         ]
-
-    async def add_comment(self, card_id: str, text: str):
-        """Add a comment to a card."""
-        await self._request(
-            "POST",
-            f"/cards/{card_id}/actions/comments",
-            json={"text": text}
-        )
 
     async def move_to_ready(self, card_id: str):
         """Move a card to the READY TO TRY list."""
@@ -1041,7 +1020,7 @@ However, this still requires a publicly accessible endpoint for the push deliver
 - [ ] Claude runner with subprocess
 - [ ] Basic state persistence
 - [ ] Main polling loop
-- [ ] Comments and card movement
+- [ ] Card movement to READY TO TRY
 
 ### Phase 2: Enhanced Features
 - [ ] YAML configuration file
