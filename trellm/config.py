@@ -17,6 +17,9 @@ class TrelloConfig:
     board_id: str
     todo_list_id: str
     ready_to_try_list_id: Optional[str] = None
+    # Optional: move completed cards to a different board
+    done_board_id: Optional[str] = None
+    done_list_id: Optional[str] = None
 
 
 @dataclass
@@ -92,6 +95,8 @@ def load_config(config_path: Optional[str] = None) -> Config:
             "TRELLO_TODO_LIST_ID", trello_data.get("todo_list_id", "")
         ),
         ready_to_try_list_id=trello_data.get("ready_to_try_list_id"),
+        done_board_id=trello_data.get("done_board_id"),
+        done_list_id=trello_data.get("done_list_id"),
     )
 
     # Build project configs

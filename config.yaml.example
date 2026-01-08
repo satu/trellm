@@ -11,6 +11,10 @@ trello:
   todo_list_id: "your-todo-list-id"
   # Optional: specify the READY TO TRY list ID (auto-discovered if not set)
   # ready_to_try_list_id: "your-ready-list-id"
+  # Optional: move completed cards to a different board
+  # If both done_board_id and done_list_id are set, cards will be moved there
+  # done_board_id: "destination-board-id"
+  # done_list_id: "destination-list-id"
 
 polling:
   # How often to check for new cards (in seconds)

@@ -33,6 +33,9 @@ class TrelloClient:
         self.board_id = config.board_id
         self.todo_list_id = config.todo_list_id
         self.ready_list_id = config.ready_to_try_list_id
+        # Optional: destination board/list for completed cards
+        self.done_board_id = config.done_board_id
+        self.done_list_id = config.done_list_id
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -83,7 +86,31 @@ class TrelloClient:
         ]
 
     async def move_to_ready(self, card_id: str) -> None:
-        """Move a card to the READY TO TRY list."""
+        """Move a card to the READY TO TRY list.
+
+        If done_board_id and done_list_id are configured, moves the card
+        to that board/list. Otherwise, moves to the READY TO TRY list
+        on the same board.
+        """
+        # If a separate done board is configured, use it
+        if self.done_board_id and self.done_list_id:
+            await self._request(
+                "PUT",
+                f"/cards/{card_id}",
+                json_data={
+                    "idList": self.done_list_id,
+                    "idBoard": self.done_board_id,
+                },
+            )
+            logger.info(
+                "Moved card %s to board %s list %s",
+                card_id,
+                self.done_board_id,
+                self.done_list_id,
+            )
+            return
+
+        # Fall back to ready_to_try_list_id on the same board
         if not self.ready_list_id:
             # Discover the list by name
             lists = await self._request("GET", f"/boards/{self.board_id}/lists")
