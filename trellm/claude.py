@@ -29,6 +29,7 @@ class ClaudeRunner:
     def __init__(self, config: ClaudeConfig):
         self.binary = config.binary
         self.timeout = config.timeout
+        self.yolo = config.yolo
 
     async def run(
         self,
@@ -59,6 +60,9 @@ class ClaudeRunner:
             "--output-format",
             "json",
         ]
+
+        if self.yolo:
+            cmd.append("--dangerously-skip-permissions")
 
         if session_id:
             cmd.extend(["--resume", session_id])

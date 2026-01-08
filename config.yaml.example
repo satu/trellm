@@ -21,6 +21,8 @@ claude:
   binary: "claude"
   # Timeout for Claude Code execution (in seconds)
   timeout: 600
+  # Run with --dangerously-skip-permissions (default: false)
+  yolo: false
   # Per-project configuration
   projects:
     # Project name matches first word of card name

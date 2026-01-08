@@ -33,6 +33,7 @@ class ClaudeConfig:
 
     binary: str = "claude"
     timeout: int = 600  # 10 minutes default
+    yolo: bool = False  # Run with --dangerously-skip-permissions
     projects: dict[str, ProjectConfig] = field(default_factory=dict)
 
 
@@ -105,6 +106,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
     claude = ClaudeConfig(
         binary=claude_data.get("binary", "claude"),
         timeout=claude_data.get("timeout", 600),
+        yolo=claude_data.get("yolo", False),
         projects=projects,
     )
 
