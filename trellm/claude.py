@@ -149,6 +149,13 @@ class ClaudeRunner:
             [
                 "",
                 "When done, commit your changes and provide a brief summary.",
+                "",
+                "Important guidelines:",
+                "- Read and understand existing code before making changes",
+                "- Write clean, maintainable code following the project's style",
+                "- Add tests when appropriate",
+                "- Commit with a clear, descriptive message",
+                "- Push your changes to the remote repository",
             ]
         )
 
