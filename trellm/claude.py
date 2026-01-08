@@ -26,10 +26,11 @@ class ClaudeResult:
 class ClaudeRunner:
     """Runs Claude Code as a subprocess."""
 
-    def __init__(self, config: ClaudeConfig):
+    def __init__(self, config: ClaudeConfig, verbose: bool = False):
         self.binary = config.binary
         self.timeout = config.timeout
         self.yolo = config.yolo
+        self.verbose = verbose
 
     async def run(
         self,
@@ -85,17 +86,45 @@ class ClaudeRunner:
         )
 
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(),
-                timeout=self.timeout,
-            )
+            if self.verbose:
+                # Stream output to terminal while also capturing it
+                stdout_lines: list[str] = []
+                stderr_lines: list[str] = []
+
+                async def read_stream(
+                    stream: asyncio.StreamReader, lines: list[str], print_output: bool
+                ) -> None:
+                    while True:
+                        line = await stream.readline()
+                        if not line:
+                            break
+                        decoded = line.decode()
+                        lines.append(decoded)
+                        if print_output:
+                            print(decoded, end="", flush=True)
+
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        read_stream(proc.stdout, stdout_lines, True),  # type: ignore[arg-type]
+                        read_stream(proc.stderr, stderr_lines, True),  # type: ignore[arg-type]
+                    ),
+                    timeout=self.timeout,
+                )
+                await proc.wait()
+                output = "".join(stdout_lines)
+                stderr_output = "".join(stderr_lines)
+            else:
+                # Quiet mode - just capture output
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(),
+                    timeout=self.timeout,
+                )
+                output = stdout.decode()
+                stderr_output = stderr.decode()
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
             raise RuntimeError(f"Claude Code timed out after {self.timeout}s")
-
-        output = stdout.decode()
-        stderr_output = stderr.decode()
 
         if proc.returncode != 0:
             logger.error("Claude Code failed with return code %d", proc.returncode)

@@ -84,11 +84,11 @@ async def process_cards(
     return processed_count
 
 
-async def run_polling_loop(config: Config) -> None:
+async def run_polling_loop(config: Config, verbose: bool = False) -> None:
     """Run the main polling loop."""
     trello = TrelloClient(config.trello)
     state = StateManager(config.state_file)
-    claude = ClaudeRunner(config.claude)
+    claude = ClaudeRunner(config.claude, verbose=verbose)
 
     logger.info("TreLLM started, polling every %d seconds", config.poll_interval)
 
@@ -104,11 +104,11 @@ async def run_polling_loop(config: Config) -> None:
         await trello.close()
 
 
-async def run_once(config: Config) -> int:
+async def run_once(config: Config, verbose: bool = False) -> int:
     """Run once and exit (for testing or one-shot mode)."""
     trello = TrelloClient(config.trello)
     state = StateManager(config.state_file)
-    claude = ClaudeRunner(config.claude)
+    claude = ClaudeRunner(config.claude, verbose=verbose)
 
     try:
         return await process_cards(trello, state, claude, config)
@@ -168,10 +168,10 @@ def main() -> None:
 
     # Run
     if args.once:
-        count = asyncio.run(run_once(config))
+        count = asyncio.run(run_once(config, verbose=args.verbose))
         logger.info("Processed %d cards", count)
     else:
-        asyncio.run(run_polling_loop(config))
+        asyncio.run(run_polling_loop(config, verbose=args.verbose))
 
 
 if __name__ == "__main__":
