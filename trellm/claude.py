@@ -77,6 +77,14 @@ class ClaudeRunner:
             session_id or "new",
         )
 
+        # In verbose mode, print the prompt being sent
+        if self.verbose:
+            print("\n" + "=" * 60, flush=True)
+            print("[Prompt]", flush=True)
+            print("-" * 60, flush=True)
+            print(prompt, flush=True)
+            print("=" * 60 + "\n", flush=True)
+
         # Determine working directory
         cwd = Path(working_dir).expanduser() if working_dir else None
 
@@ -158,25 +166,48 @@ class ClaudeRunner:
             msg_type = data.get("type")
 
             if msg_type == "assistant":
-                # Extract text content from assistant messages
+                # Extract content from assistant messages
                 message = data.get("message", {})
                 content = message.get("content", [])
                 for item in content:
-                    if item.get("type") == "text":
+                    item_type = item.get("type")
+                    if item_type == "thinking":
+                        # Show Claude's thinking/reasoning
+                        thinking = item.get("thinking", "")
+                        if thinking:
+                            # Show first 500 chars of thinking
+                            preview = thinking[:500]
+                            if len(thinking) > 500:
+                                preview += "..."
+                            print(f"\n[Thinking] {preview}", flush=True)
+                    elif item_type == "text":
                         text = item.get("text", "")
                         if text:
                             print(f"\n[Claude] {text}", flush=True)
-                    elif item.get("type") == "tool_use":
+                    elif item_type == "tool_use":
                         tool_name = item.get("name", "unknown")
-                        print(f"\n[Tool: {tool_name}]", flush=True)
+                        tool_input = item.get("input", {})
+                        # Show tool name and brief input summary
+                        if tool_name == "Edit":
+                            file_path = tool_input.get("file_path", "")
+                            print(f"\n[Tool: {tool_name}] {file_path}", flush=True)
+                        elif tool_name == "Read":
+                            file_path = tool_input.get("file_path", "")
+                            print(f"\n[Tool: {tool_name}] {file_path}", flush=True)
+                        elif tool_name == "Bash":
+                            cmd = tool_input.get("command", "")[:80]
+                            print(f"\n[Tool: {tool_name}] {cmd}", flush=True)
+                        elif tool_name == "Grep":
+                            pattern = tool_input.get("pattern", "")
+                            print(f"\n[Tool: {tool_name}] {pattern}", flush=True)
+                        else:
+                            print(f"\n[Tool: {tool_name}]", flush=True)
 
             elif msg_type == "user":
                 # Tool results or user messages
                 content = data.get("message", {}).get("content", [])
                 for item in content:
                     if item.get("type") == "tool_result":
-                        # Don't print full tool results, just indicate completion
-                        tool_use_id = item.get("tool_use_id", "")[:8]
                         is_error = item.get("is_error", False)
                         status = "error" if is_error else "done"
                         print(f"  [{status}]", flush=True)
@@ -185,7 +216,11 @@ class ClaudeRunner:
                 # Final result
                 result = data.get("result", "")
                 if result:
-                    print(f"\n[Result] {result[:200]}...", flush=True)
+                    print("\n" + "=" * 60, flush=True)
+                    print("[Result]", flush=True)
+                    print("-" * 60, flush=True)
+                    print(result, flush=True)
+                    print("=" * 60, flush=True)
 
         except json.JSONDecodeError:
             pass
