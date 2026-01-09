@@ -18,11 +18,15 @@ logger = logging.getLogger(__name__)
 
 
 def parse_project(card_name: str) -> str:
-    """Extract project name (first word) from card name."""
+    """Extract project name (first word) from card name.
+
+    Supports both "project task" and "project: task" formats.
+    """
     parts = card_name.split()
     if not parts:
         return "unknown"
-    return parts[0].lower()
+    # Strip trailing colon if present (e.g., "trellm:" -> "trellm")
+    return parts[0].rstrip(":").lower()
 
 
 async def process_cards(
