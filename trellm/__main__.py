@@ -92,7 +92,11 @@ async def run_polling_loop(config: Config, verbose: bool = False) -> None:
     """Run the main polling loop."""
     trello = TrelloClient(config.trello)
     state = StateManager(config.state_file)
-    claude = ClaudeRunner(config.claude, verbose=verbose)
+    claude = ClaudeRunner(
+        config.claude,
+        verbose=verbose,
+        ready_list_id=config.trello.ready_to_try_list_id,
+    )
 
     logger.info("TreLLM started, polling every %d seconds", config.poll_interval)
 
@@ -112,7 +116,11 @@ async def run_once(config: Config, verbose: bool = False) -> int:
     """Run once and exit (for testing or one-shot mode)."""
     trello = TrelloClient(config.trello)
     state = StateManager(config.state_file)
-    claude = ClaudeRunner(config.claude, verbose=verbose)
+    claude = ClaudeRunner(
+        config.claude,
+        verbose=verbose,
+        ready_list_id=config.trello.ready_to_try_list_id,
+    )
 
     try:
         return await process_cards(trello, state, claude, config)

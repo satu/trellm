@@ -26,11 +26,17 @@ class ClaudeResult:
 class ClaudeRunner:
     """Runs Claude Code as a subprocess."""
 
-    def __init__(self, config: ClaudeConfig, verbose: bool = False):
+    def __init__(
+        self,
+        config: ClaudeConfig,
+        verbose: bool = False,
+        ready_list_id: Optional[str] = None,
+    ):
         self.binary = config.binary
         self.timeout = config.timeout
         self.yolo = config.yolo
         self.verbose = verbose
+        self.ready_list_id = ready_list_id
 
     async def run(
         self,
@@ -227,6 +233,12 @@ class ClaudeRunner:
 
     def _build_prompt(self, card: TrelloCard) -> str:
         """Build the prompt for Claude Code."""
+        # Build the move instruction based on ready_list_id
+        if self.ready_list_id:
+            move_instruction = f"- Move the card to list ID {self.ready_list_id} when done"
+        else:
+            move_instruction = "- Move the card to the READY TO TRY list when done"
+
         return f"""Work on Trello card {card.id}
 
 Card URL: {card.url}
@@ -242,7 +254,8 @@ Important guidelines:
 - Add tests when appropriate
 - Commit with a clear, descriptive message
 - Push your changes to the remote repository
-- When done, add a comment starting with "Claude:" summarizing what was done"""
+- When done, add a comment starting with "Claude:" summarizing what was done
+{move_instruction}"""
 
     def _parse_output(self, output: str) -> ClaudeResult:
         """Parse Claude Code's JSON output.
