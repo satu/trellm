@@ -95,11 +95,13 @@ class ClaudeRunner:
         cwd = Path(working_dir).expanduser() if working_dir else None
 
         # Run subprocess
+        # Use a larger buffer limit (10MB) to handle long JSON lines from Claude
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
+            limit=10 * 1024 * 1024,  # 10MB buffer for long lines
         )
 
         try:
