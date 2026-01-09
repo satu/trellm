@@ -227,7 +227,7 @@ class ClaudeRunner:
 
     def _build_prompt(self, card: TrelloCard) -> str:
         """Build the prompt for Claude Code."""
-        return f"""Work on Trello card {card.id}: {card.name}
+        return f"""Work on Trello card {card.id}
 
 Card URL: {card.url}
 
