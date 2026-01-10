@@ -257,7 +257,14 @@ Important guidelines:
 - Commit with a clear, descriptive message
 - Push your changes to the remote repository
 - When done, add a comment starting with "Claude:" summarizing what was done
-{move_instruction}"""
+{move_instruction}
+
+Voice note handling:
+- Check if the card has audio file attachments (voice notes, typically .opus, .ogg, .m4a, .mp3, .wav files)
+- If voice notes exist, check comments to see if they've already been transcribed (look for "Transcribed: [filename]" in comments)
+- For any new/untranscribed voice notes: download the file, transcribe it, and add a comment with the transcription like "Claude: Transcribed: [filename]\\n[transcription content]"
+- If this is a new card with a voice note and minimal description, update the card name and description based on your understanding of the transcribed voice note
+- Process the transcribed instructions along with any other card content"""
 
     def _parse_output(self, output: str) -> ClaudeResult:
         """Parse Claude Code's JSON output.

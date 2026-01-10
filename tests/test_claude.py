@@ -34,6 +34,27 @@ class TestClaudeRunner:
         assert "myproject implement feature" not in prompt
         assert "Add a new button to the UI" not in prompt
 
+    def test_build_prompt_includes_voice_note_instructions(self):
+        """Test that prompt includes voice note handling instructions."""
+        config = ClaudeConfig()
+        runner = ClaudeRunner(config)
+
+        card = TrelloCard(
+            id="abc123",
+            name="test card",
+            description="",
+            url="https://trello.com/c/abc123",
+            last_activity="2026-01-08T12:00:00Z",
+        )
+
+        prompt = runner._build_prompt(card)
+
+        # Should include voice note handling instructions
+        assert "Voice note handling:" in prompt
+        assert "audio file attachments" in prompt
+        assert "Transcribed:" in prompt
+        assert ".opus" in prompt or "voice notes" in prompt
+
     def test_build_prompt_no_description(self):
         """Test prompt building without description."""
         config = ClaudeConfig()
