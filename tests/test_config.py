@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from trellm.config import Config, load_config, ProjectConfig
+from trellm.config import Config, load_config, ProjectConfig, TrelloConfig, ClaudeConfig
+from trellm.__main__ import compare_configs, configs_equal
 
 
 class TestLoadConfig:
@@ -141,3 +142,133 @@ class TestConfig:
 
         assert config.get_initial_session_id("myproject") == "abc123"
         assert config.get_initial_session_id("unknown") is None
+
+
+class TestConfigComparison:
+    """Tests for config comparison functions."""
+
+    def _make_config(self, **overrides) -> Config:
+        """Create a base config with optional overrides."""
+        base = {
+            "trello": TrelloConfig(
+                api_key="key",
+                api_token="token",
+                board_id="board",
+                todo_list_id="todo",
+                ready_to_try_list_id="ready",
+            ),
+            "claude": ClaudeConfig(
+                binary="claude",
+                timeout=600,
+                yolo=False,
+                projects={"proj1": ProjectConfig(working_dir="~/src/proj1")},
+            ),
+            "poll_interval": 5,
+            "state_file": "~/.trellm/state.json",
+        }
+        base.update(overrides)
+        return Config(**base)
+
+    def test_configs_equal_same(self):
+        """Test that identical configs are equal."""
+        config1 = self._make_config()
+        config2 = self._make_config()
+
+        assert configs_equal(config1, config2)
+        assert compare_configs(config1, config2) == []
+
+    def test_configs_equal_poll_interval_change(self):
+        """Test detecting poll_interval change."""
+        config1 = self._make_config(poll_interval=5)
+        config2 = self._make_config(poll_interval=10)
+
+        assert not configs_equal(config1, config2)
+        changes = compare_configs(config1, config2)
+        assert len(changes) == 1
+        assert "poll_interval: 5 → 10" in changes[0]
+
+    def test_configs_equal_claude_binary_change(self):
+        """Test detecting claude binary change."""
+        config1 = self._make_config()
+        config2 = self._make_config(
+            claude=ClaudeConfig(
+                binary="/usr/bin/claude",
+                timeout=600,
+                yolo=False,
+                projects={"proj1": ProjectConfig(working_dir="~/src/proj1")},
+            )
+        )
+
+        assert not configs_equal(config1, config2)
+        changes = compare_configs(config1, config2)
+        assert any("claude.binary" in c for c in changes)
+
+    def test_configs_equal_yolo_change(self):
+        """Test detecting yolo flag change."""
+        config1 = self._make_config()
+        config2 = self._make_config(
+            claude=ClaudeConfig(
+                binary="claude",
+                timeout=600,
+                yolo=True,
+                projects={"proj1": ProjectConfig(working_dir="~/src/proj1")},
+            )
+        )
+
+        assert not configs_equal(config1, config2)
+        changes = compare_configs(config1, config2)
+        assert any("claude.yolo" in c for c in changes)
+
+    def test_configs_equal_project_added(self):
+        """Test detecting added project."""
+        config1 = self._make_config()
+        config2 = self._make_config(
+            claude=ClaudeConfig(
+                binary="claude",
+                timeout=600,
+                yolo=False,
+                projects={
+                    "proj1": ProjectConfig(working_dir="~/src/proj1"),
+                    "proj2": ProjectConfig(working_dir="~/src/proj2"),
+                },
+            )
+        )
+
+        assert not configs_equal(config1, config2)
+        changes = compare_configs(config1, config2)
+        assert any("Added project: proj2" in c for c in changes)
+
+    def test_configs_equal_project_removed(self):
+        """Test detecting removed project."""
+        config1 = self._make_config(
+            claude=ClaudeConfig(
+                binary="claude",
+                timeout=600,
+                yolo=False,
+                projects={
+                    "proj1": ProjectConfig(working_dir="~/src/proj1"),
+                    "proj2": ProjectConfig(working_dir="~/src/proj2"),
+                },
+            )
+        )
+        config2 = self._make_config()
+
+        assert not configs_equal(config1, config2)
+        changes = compare_configs(config1, config2)
+        assert any("Removed project: proj2" in c for c in changes)
+
+    def test_configs_equal_project_working_dir_changed(self):
+        """Test detecting project working_dir change."""
+        config1 = self._make_config()
+        config2 = self._make_config(
+            claude=ClaudeConfig(
+                binary="claude",
+                timeout=600,
+                yolo=False,
+                projects={"proj1": ProjectConfig(working_dir="~/src/proj1-new")},
+            )
+        )
+
+        assert not configs_equal(config1, config2)
+        changes = compare_configs(config1, config2)
+        assert any("proj1.working_dir" in c for c in changes)

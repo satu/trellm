@@ -25,11 +25,14 @@ class TestClaudeRunner:
 
         prompt = runner._build_prompt(card)
 
+        # Prompt includes card ID and URL but NOT name/description
+        # (Claude fetches these from Trello directly)
         assert "abc123" in prompt
-        assert "myproject implement feature" in prompt
         assert "https://trello.com/c/abc123" in prompt
-        assert "Add a new button to the UI" in prompt
         assert "commit your changes" in prompt
+        # Name and description should NOT be in prompt
+        assert "myproject implement feature" not in prompt
+        assert "Add a new button to the UI" not in prompt
 
     def test_build_prompt_no_description(self):
         """Test prompt building without description."""

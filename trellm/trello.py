@@ -128,3 +128,12 @@ class TrelloClient:
             logger.info("Moved card %s to READY TO TRY", card_id)
         else:
             logger.warning("Could not find READY TO TRY list")
+
+    async def add_comment(self, card_id: str, text: str) -> None:
+        """Add a comment to a card."""
+        await self._request(
+            "POST",
+            f"/cards/{card_id}/actions/comments",
+            params={"text": text},
+        )
+        logger.debug("Added comment to card %s", card_id)
