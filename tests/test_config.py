@@ -92,7 +92,7 @@ class TestLoadConfig:
         assert config.poll_interval == 5
         assert config.state_file == "~/.trellm/state.json"
         assert config.claude.binary == "claude"
-        assert config.claude.timeout == 600
+        assert config.claude.timeout == 1200
 
 
 class TestConfig:

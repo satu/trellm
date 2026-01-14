@@ -173,7 +173,7 @@ class ClaudeResult:
 class ClaudeRunner:
     def __init__(self, config):
         self.binary = config.get("binary", "claude")
-        self.timeout = config.get("timeout", 600)  # 10 minutes default
+        self.timeout = config.get("timeout", 1200)  # 20 minutes default
 
     async def run(
         self,

@@ -24,7 +24,7 @@ claude:
   # Path to Claude Code binary (default: "claude")
   binary: "claude"
   # Timeout for Claude Code execution (in seconds)
-  timeout: 600
+  timeout: 1200
   # Run with --dangerously-skip-permissions (default: false)
   yolo: false
   # Per-project configuration
