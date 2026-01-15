@@ -130,6 +130,17 @@ async def process_cards(
                 continue
 
         project = parse_project(card.name)
+
+        # Skip cards for unrecognized projects
+        if project not in config.claude.projects:
+            logger.warning(
+                "Skipping card %s: project '%s' not in config (card: %s)",
+                card.id,
+                project,
+                card.name[:50],
+            )
+            continue
+
         logger.info("Processing card %s for project %s: %s", card.id, project, card.name)
 
         # Get session ID for this project
@@ -318,6 +329,16 @@ async def run_polling_loop(
                             continue
 
                     project = parse_project(card.name)
+
+                    # Skip cards for unrecognized projects
+                    if project not in current_config.claude.projects:
+                        logger.warning(
+                            "Skipping card %s: project '%s' not in config (card: %s)",
+                            card.id,
+                            project,
+                            card.name[:50],
+                        )
+                        continue
 
                     # Mark as being processed before spawning task
                     _processing_cards.add(card.id)
