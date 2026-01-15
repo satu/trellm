@@ -22,6 +22,12 @@ logger = logging.getLogger(__name__)
 # Per-project locks to ensure only one Claude instance runs per project
 _project_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
+# Track cards currently being processed to avoid duplicate processing
+_processing_cards: set[str] = set()
+
+# Track running tasks for cleanup
+_running_tasks: set[asyncio.Task] = set()
+
 
 def parse_project(card_name: str) -> str:
     """Extract project name (first word) from card name.
@@ -169,6 +175,7 @@ async def process_card_for_project(
     """Process a single card for a project, with per-project locking.
 
     Returns the card ID if processed successfully, None otherwise.
+    Cards are tracked in _processing_cards while being processed.
     """
     lock = _project_locks[project]
 
@@ -207,6 +214,22 @@ async def process_card_for_project(
         except Exception as e:
             logger.error("[%s] Failed to process card %s: %s", project, card.id, e)
             return None
+        finally:
+            # Always remove from processing set when done
+            _processing_cards.discard(card.id)
+
+
+def _task_done_callback(task: asyncio.Task) -> None:
+    """Callback to clean up completed tasks and track results."""
+    _running_tasks.discard(task)
+    try:
+        result = task.result()
+        if isinstance(result, str):  # Card ID returned on success
+            # Store for config reload notifications (best effort)
+            task._last_processed_card_id = result  # type: ignore[attr-defined]
+    except Exception:
+        # Task failed, already logged in process_card_for_project
+        pass
 
 
 async def run_polling_loop(
@@ -214,7 +237,11 @@ async def run_polling_loop(
     verbose: bool = False,
     config_path: Optional[str] = None,
 ) -> None:
-    """Run the main polling loop with hot config reloading and parallel execution."""
+    """Run the main polling loop with hot config reloading and parallel execution.
+
+    Tasks are spawned in the background and polling continues while they run.
+    Per-project locks ensure only one task runs per project at a time.
+    """
     trello = TrelloClient(config.trello)
     state = StateManager(config.state_file)
     claude = ClaudeRunner(
@@ -270,15 +297,16 @@ async def run_polling_loop(
                 # Config reload failed - keep using old config
                 logger.warning("Failed to reload config, keeping current: %s", e)
 
-            # Process cards - group by project for parallel execution
+            # Process cards - spawn background tasks for new cards
             try:
                 cards = await trello.get_todo_cards()
                 logger.debug("Found %d cards in TODO", len(cards))
 
-                # Filter cards that need processing and group by project
-                cards_by_project: dict[str, list[TrelloCard]] = defaultdict(list)
-
                 for card in cards:
+                    # Skip if already being processed
+                    if card.id in _processing_cards:
+                        continue
+
                     # Skip if already processed (unless moved back to TODO)
                     if state.is_processed(card.id):
                         if state.should_reprocess(card.id, card.last_activity):
@@ -290,41 +318,39 @@ async def run_polling_loop(
                             continue
 
                     project = parse_project(card.name)
-                    cards_by_project[project].append(card)
 
-                # Process each project's first card in parallel
-                # (subsequent cards will wait due to per-project lock)
-                if cards_by_project:
-                    tasks = []
-                    for project, project_cards in cards_by_project.items():
-                        # Only process the first card per project in this cycle
-                        # (the lock ensures serialization within a project)
-                        card = project_cards[0]
-                        task = asyncio.create_task(
-                            process_card_for_project(
-                                card=card,
-                                project=project,
-                                trello=trello,
-                                state=state,
-                                claude=claude,
-                                config=current_config,
-                            )
+                    # Mark as being processed before spawning task
+                    _processing_cards.add(card.id)
+
+                    # Spawn background task - don't await, let it run in background
+                    task = asyncio.create_task(
+                        process_card_for_project(
+                            card=card,
+                            project=project,
+                            trello=trello,
+                            state=state,
+                            claude=claude,
+                            config=current_config,
                         )
-                        tasks.append(task)
-
-                    # Wait for all parallel tasks to complete
-                    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-                    # Track the last successfully processed card
-                    for result in results:
-                        if isinstance(result, str):  # Card ID returned on success
-                            last_processed_card_id = result
+                    )
+                    task.add_done_callback(_task_done_callback)
+                    _running_tasks.add(task)
+                    logger.info(
+                        "[%s] Spawned background task for card %s",
+                        project,
+                        card.id,
+                    )
 
             except Exception as e:
                 logger.error("Error in polling loop: %s", e)
 
             await asyncio.sleep(current_config.poll_interval)
     finally:
+        # Cancel all running tasks on shutdown
+        for task in _running_tasks:
+            task.cancel()
+        if _running_tasks:
+            await asyncio.gather(*_running_tasks, return_exceptions=True)
         await trello.close()
 
 

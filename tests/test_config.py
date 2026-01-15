@@ -8,7 +8,12 @@ import pytest
 import yaml
 
 from trellm.config import Config, load_config, ProjectConfig, TrelloConfig, ClaudeConfig
-from trellm.__main__ import compare_configs, configs_equal, parse_project
+from trellm.__main__ import (
+    compare_configs,
+    configs_equal,
+    parse_project,
+    _processing_cards,
+)
 
 
 class TestLoadConfig:
@@ -300,3 +305,26 @@ class TestParseProject:
     def test_parse_project_colon_only(self):
         """Test that trailing colon is stripped."""
         assert parse_project("trellm:") == "trellm"
+
+
+class TestProcessingCardsTracking:
+    """Tests for _processing_cards set that tracks in-flight cards."""
+
+    def test_processing_cards_is_set(self):
+        """Test that _processing_cards is a set type."""
+        assert isinstance(_processing_cards, set)
+
+    def test_processing_cards_add_remove(self):
+        """Test adding and removing cards from processing set."""
+        test_card_id = "test_card_123"
+
+        # Ensure clean state
+        _processing_cards.discard(test_card_id)
+
+        # Add card
+        _processing_cards.add(test_card_id)
+        assert test_card_id in _processing_cards
+
+        # Remove card
+        _processing_cards.discard(test_card_id)
+        assert test_card_id not in _processing_cards
