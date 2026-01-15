@@ -120,27 +120,32 @@ Or maybe malformed { json
         assert result.session_id == "new-session"
         assert result.summary == "All done"
 
-    def test_project_prefix_in_verbose_mode(self):
-        """Test that project prefix is set correctly for verbose output."""
+    def test_print_prefixed_single_line(self, capsys):
+        """Test _print_prefixed with single line."""
         config = ClaudeConfig()
         runner = ClaudeRunner(config, verbose=True)
 
-        # Initially no project set
-        assert runner._current_project is None
-        assert runner._prefix() == ""
+        runner._print_prefixed("Hello world", "[test] ")
 
-        # After setting project, prefix should include it
-        runner._current_project = "myproject"
-        assert runner._prefix() == "[myproject] "
+        captured = capsys.readouterr()
+        assert captured.out == "[test] Hello world\n"
 
-    def test_project_prefix_empty_when_no_project(self):
-        """Test that prefix is empty when no project is set."""
+    def test_print_prefixed_multiline(self, capsys):
+        """Test _print_prefixed with multiline text."""
         config = ClaudeConfig()
         runner = ClaudeRunner(config, verbose=True)
 
-        runner._current_project = None
-        assert runner._prefix() == ""
+        runner._print_prefixed("Line 1\nLine 2\nLine 3", "[proj] ")
 
-        runner._current_project = ""
-        # Empty string is falsy, so prefix should still be empty
-        assert runner._prefix() == ""
+        captured = capsys.readouterr()
+        assert captured.out == "[proj] Line 1\n[proj] Line 2\n[proj] Line 3\n"
+
+    def test_print_prefixed_empty_prefix(self, capsys):
+        """Test _print_prefixed with empty prefix."""
+        config = ClaudeConfig()
+        runner = ClaudeRunner(config, verbose=True)
+
+        runner._print_prefixed("No prefix", "")
+
+        captured = capsys.readouterr()
+        assert captured.out == "No prefix\n"

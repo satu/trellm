@@ -37,7 +37,6 @@ class ClaudeRunner:
         self.yolo = config.yolo
         self.verbose = verbose
         self.ready_list_id = ready_list_id
-        self._current_project: Optional[str] = None  # For verbose output prefixing
 
     async def run(
         self,
@@ -57,8 +56,9 @@ class ClaudeRunner:
         Returns:
             ClaudeResult with success status, new session ID, and output
         """
-        # Set current project for verbose output prefixing
-        self._current_project = project
+        # Capture project prefix as local variable to avoid race conditions
+        # when multiple tasks run in parallel with different projects
+        prefix = f"[{project}] " if project else ""
 
         # Build the prompt
         prompt = self._build_prompt(card)
@@ -89,11 +89,10 @@ class ClaudeRunner:
 
         # In verbose mode, print the prompt being sent
         if self.verbose:
-            prefix = self._prefix()
             print(f"\n{prefix}" + "=" * 60, flush=True)
             print(f"{prefix}[Prompt]", flush=True)
             print(f"{prefix}" + "-" * 60, flush=True)
-            self._print_prefixed(prompt)
+            self._print_prefixed(prompt, prefix)
             print(f"{prefix}" + "=" * 60 + "\n", flush=True)
 
         # Determine working directory
@@ -125,18 +124,18 @@ class ClaudeRunner:
                         decoded = line.decode()
                         stdout_lines.append(decoded)
                         # Parse JSON and extract human-readable content
-                        self._print_stream_json_line(decoded)
+                        # Pass prefix to avoid race condition with parallel tasks
+                        self._print_stream_json_line(decoded, prefix)
 
                 async def read_stderr_stream(stream: asyncio.StreamReader) -> None:
                     """Read stderr and print it with project prefix."""
-                    prefix = self._prefix()
                     while True:
                         line = await stream.readline()
                         if not line:
                             break
                         decoded = line.decode()
                         stderr_lines.append(decoded)
-                        # Prefix stderr output
+                        # Prefix stderr output (uses captured prefix from closure)
                         print(f"{prefix}{decoded}", end="", flush=True)
 
                 await asyncio.wait_for(
@@ -170,15 +169,14 @@ class ClaudeRunner:
         # Parse JSON output
         return self._parse_output(output)
 
-    def _prefix(self) -> str:
-        """Get the project prefix for verbose output."""
-        if self._current_project:
-            return f"[{self._current_project}] "
-        return ""
+    def _print_prefixed(self, text: str, prefix: str, end: str = "\n") -> None:
+        """Print text with project prefix.
 
-    def _print_prefixed(self, text: str, end: str = "\n") -> None:
-        """Print text with project prefix."""
-        prefix = self._prefix()
+        Args:
+            text: The text to print
+            prefix: The project prefix (e.g., "[myproject] ")
+            end: Line ending character
+        """
         # Prefix each line for multi-line output
         if "\n" in text and end == "\n":
             lines = text.split("\n")
@@ -187,8 +185,13 @@ class ClaudeRunner:
         else:
             print(f"{prefix}{text}", end=end, flush=True)
 
-    def _print_stream_json_line(self, line: str) -> None:
-        """Parse a stream-json line and print human-readable content."""
+    def _print_stream_json_line(self, line: str, prefix: str) -> None:
+        """Parse a stream-json line and print human-readable content.
+
+        Args:
+            line: The JSON line from stream-json output
+            prefix: The project prefix (e.g., "[myproject] ")
+        """
         line = line.strip()
         if not line or not line.startswith("{"):
             return
@@ -196,7 +199,6 @@ class ClaudeRunner:
         try:
             data = json.loads(line)
             msg_type = data.get("type")
-            prefix = self._prefix()
 
             if msg_type == "assistant":
                 # Extract content from assistant messages
@@ -252,7 +254,7 @@ class ClaudeRunner:
                     print(f"\n{prefix}" + "=" * 60, flush=True)
                     print(f"{prefix}[Result]", flush=True)
                     print(f"{prefix}" + "-" * 60, flush=True)
-                    self._print_prefixed(result)
+                    self._print_prefixed(result, prefix)
                     print(f"{prefix}" + "=" * 60, flush=True)
 
         except json.JSONDecodeError:
