@@ -119,3 +119,28 @@ Or maybe malformed { json
         # Should get the last session_id
         assert result.session_id == "new-session"
         assert result.summary == "All done"
+
+    def test_project_prefix_in_verbose_mode(self):
+        """Test that project prefix is set correctly for verbose output."""
+        config = ClaudeConfig()
+        runner = ClaudeRunner(config, verbose=True)
+
+        # Initially no project set
+        assert runner._current_project is None
+        assert runner._prefix() == ""
+
+        # After setting project, prefix should include it
+        runner._current_project = "myproject"
+        assert runner._prefix() == "[myproject] "
+
+    def test_project_prefix_empty_when_no_project(self):
+        """Test that prefix is empty when no project is set."""
+        config = ClaudeConfig()
+        runner = ClaudeRunner(config, verbose=True)
+
+        runner._current_project = None
+        assert runner._prefix() == ""
+
+        runner._current_project = ""
+        # Empty string is falsy, so prefix should still be empty
+        assert runner._prefix() == ""

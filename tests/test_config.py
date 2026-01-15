@@ -8,7 +8,7 @@ import pytest
 import yaml
 
 from trellm.config import Config, load_config, ProjectConfig, TrelloConfig, ClaudeConfig
-from trellm.__main__ import compare_configs, configs_equal
+from trellm.__main__ import compare_configs, configs_equal, parse_project
 
 
 class TestLoadConfig:
@@ -272,3 +272,31 @@ class TestConfigComparison:
         assert not configs_equal(config1, config2)
         changes = compare_configs(config1, config2)
         assert any("proj1.working_dir" in c for c in changes)
+
+
+class TestParseProject:
+    """Tests for parse_project function."""
+
+    def test_parse_simple_project_name(self):
+        """Test parsing project name from simple card title."""
+        assert parse_project("myproject implement feature") == "myproject"
+
+    def test_parse_project_with_colon(self):
+        """Test parsing project name with colon separator."""
+        assert parse_project("myproject: implement feature") == "myproject"
+
+    def test_parse_project_uppercase(self):
+        """Test that project name is lowercased."""
+        assert parse_project("MyProject fix bug") == "myproject"
+
+    def test_parse_project_empty_name(self):
+        """Test parsing empty card name returns 'unknown'."""
+        assert parse_project("") == "unknown"
+
+    def test_parse_project_single_word(self):
+        """Test parsing single word card name."""
+        assert parse_project("trellm") == "trellm"
+
+    def test_parse_project_colon_only(self):
+        """Test that trailing colon is stripped."""
+        assert parse_project("trellm:") == "trellm"

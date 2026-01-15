@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import logging
 import sys
+from collections import defaultdict
 from dataclasses import asdict
 from typing import Optional
 
@@ -17,6 +18,9 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# Per-project locks to ensure only one Claude instance runs per project
+_project_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 
 def parse_project(card_name: str) -> str:
@@ -154,12 +158,63 @@ async def process_cards(
     return processed_count
 
 
+async def process_card_for_project(
+    card: TrelloCard,
+    project: str,
+    trello: TrelloClient,
+    state: StateManager,
+    claude: ClaudeRunner,
+    config: Config,
+) -> Optional[str]:
+    """Process a single card for a project, with per-project locking.
+
+    Returns the card ID if processed successfully, None otherwise.
+    """
+    lock = _project_locks[project]
+
+    async with lock:
+        logger.info(
+            "[%s] Processing card %s: %s",
+            project,
+            card.id,
+            card.name,
+        )
+
+        # Get session ID for this project
+        session_id = state.get_session(project)
+        if not session_id:
+            session_id = config.get_initial_session_id(project)
+
+        # Run Claude Code
+        try:
+            result = await claude.run(
+                card=card,
+                project=project,
+                session_id=session_id,
+                working_dir=config.get_working_dir(project),
+            )
+
+            # Update session ID for next task
+            if result.session_id:
+                state.set_session(project, result.session_id)
+
+            # Mark as processed and move card
+            state.mark_processed(card.id)
+            await trello.move_to_ready(card.id)
+            logger.info("[%s] Completed card %s", project, card.id)
+            return card.id
+
+        except Exception as e:
+            logger.error("[%s] Failed to process card %s: %s", project, card.id, e)
+            return None
+
+
 async def run_polling_loop(
     config: Config,
     verbose: bool = False,
     config_path: Optional[str] = None,
 ) -> None:
-    """Run the main polling loop with hot config reloading."""
+    """Run the main polling loop with hot config reloading and parallel execution."""
     trello = TrelloClient(config.trello)
     state = StateManager(config.state_file)
     claude = ClaudeRunner(
@@ -215,10 +270,13 @@ async def run_polling_loop(
                 # Config reload failed - keep using old config
                 logger.warning("Failed to reload config, keeping current: %s", e)
 
-            # Process cards
+            # Process cards - group by project for parallel execution
             try:
                 cards = await trello.get_todo_cards()
                 logger.debug("Found %d cards in TODO", len(cards))
+
+                # Filter cards that need processing and group by project
+                cards_by_project: dict[str, list[TrelloCard]] = defaultdict(list)
 
                 for card in cards:
                     # Skip if already processed (unless moved back to TODO)
@@ -232,41 +290,35 @@ async def run_polling_loop(
                             continue
 
                     project = parse_project(card.name)
-                    logger.info(
-                        "Processing card %s for project %s: %s",
-                        card.id,
-                        project,
-                        card.name,
-                    )
+                    cards_by_project[project].append(card)
 
-                    # Get session ID for this project
-                    session_id = state.get_session(project)
-                    if not session_id:
-                        session_id = current_config.get_initial_session_id(project)
-
-                    # Run Claude Code
-                    try:
-                        result = await claude.run(
-                            card=card,
-                            project=project,
-                            session_id=session_id,
-                            working_dir=current_config.get_working_dir(project),
+                # Process each project's first card in parallel
+                # (subsequent cards will wait due to per-project lock)
+                if cards_by_project:
+                    tasks = []
+                    for project, project_cards in cards_by_project.items():
+                        # Only process the first card per project in this cycle
+                        # (the lock ensures serialization within a project)
+                        card = project_cards[0]
+                        task = asyncio.create_task(
+                            process_card_for_project(
+                                card=card,
+                                project=project,
+                                trello=trello,
+                                state=state,
+                                claude=claude,
+                                config=current_config,
+                            )
                         )
+                        tasks.append(task)
 
-                        # Update session ID for next task
-                        if result.session_id:
-                            state.set_session(project, result.session_id)
+                    # Wait for all parallel tasks to complete
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                        # Mark as processed and move card
-                        state.mark_processed(card.id)
-                        await trello.move_to_ready(card.id)
-                        logger.info("Completed card %s", card.id)
-
-                        # Track this card for config reload notifications
-                        last_processed_card_id = card.id
-
-                    except Exception as e:
-                        logger.error("Failed to process card %s: %s", card.id, e)
+                    # Track the last successfully processed card
+                    for result in results:
+                        if isinstance(result, str):  # Card ID returned on success
+                            last_processed_card_id = result
 
             except Exception as e:
                 logger.error("Error in polling loop: %s", e)

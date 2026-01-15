@@ -37,6 +37,7 @@ class ClaudeRunner:
         self.yolo = config.yolo
         self.verbose = verbose
         self.ready_list_id = ready_list_id
+        self._current_project: Optional[str] = None  # For verbose output prefixing
 
     async def run(
         self,
@@ -56,6 +57,9 @@ class ClaudeRunner:
         Returns:
             ClaudeResult with success status, new session ID, and output
         """
+        # Set current project for verbose output prefixing
+        self._current_project = project
+
         # Build the prompt
         prompt = self._build_prompt(card)
 
@@ -85,11 +89,12 @@ class ClaudeRunner:
 
         # In verbose mode, print the prompt being sent
         if self.verbose:
-            print("\n" + "=" * 60, flush=True)
-            print("[Prompt]", flush=True)
-            print("-" * 60, flush=True)
-            print(prompt, flush=True)
-            print("=" * 60 + "\n", flush=True)
+            prefix = self._prefix()
+            print(f"\n{prefix}" + "=" * 60, flush=True)
+            print(f"{prefix}[Prompt]", flush=True)
+            print(f"{prefix}" + "-" * 60, flush=True)
+            self._print_prefixed(prompt)
+            print(f"{prefix}" + "=" * 60 + "\n", flush=True)
 
         # Determine working directory
         cwd = Path(working_dir).expanduser() if working_dir else None
@@ -123,14 +128,16 @@ class ClaudeRunner:
                         self._print_stream_json_line(decoded)
 
                 async def read_stderr_stream(stream: asyncio.StreamReader) -> None:
-                    """Read stderr and print it directly."""
+                    """Read stderr and print it with project prefix."""
+                    prefix = self._prefix()
                     while True:
                         line = await stream.readline()
                         if not line:
                             break
                         decoded = line.decode()
                         stderr_lines.append(decoded)
-                        print(decoded, end="", flush=True)
+                        # Prefix stderr output
+                        print(f"{prefix}{decoded}", end="", flush=True)
 
                 await asyncio.wait_for(
                     asyncio.gather(
@@ -163,6 +170,23 @@ class ClaudeRunner:
         # Parse JSON output
         return self._parse_output(output)
 
+    def _prefix(self) -> str:
+        """Get the project prefix for verbose output."""
+        if self._current_project:
+            return f"[{self._current_project}] "
+        return ""
+
+    def _print_prefixed(self, text: str, end: str = "\n") -> None:
+        """Print text with project prefix."""
+        prefix = self._prefix()
+        # Prefix each line for multi-line output
+        if "\n" in text and end == "\n":
+            lines = text.split("\n")
+            for line in lines:
+                print(f"{prefix}{line}", flush=True)
+        else:
+            print(f"{prefix}{text}", end=end, flush=True)
+
     def _print_stream_json_line(self, line: str) -> None:
         """Parse a stream-json line and print human-readable content."""
         line = line.strip()
@@ -172,6 +196,7 @@ class ClaudeRunner:
         try:
             data = json.loads(line)
             msg_type = data.get("type")
+            prefix = self._prefix()
 
             if msg_type == "assistant":
                 # Extract content from assistant messages
@@ -187,29 +212,29 @@ class ClaudeRunner:
                             preview = thinking[:500]
                             if len(thinking) > 500:
                                 preview += "..."
-                            print(f"\n[Thinking] {preview}", flush=True)
+                            print(f"\n{prefix}[Thinking] {preview}", flush=True)
                     elif item_type == "text":
                         text = item.get("text", "")
                         if text:
-                            print(f"\n[Claude] {text}", flush=True)
+                            print(f"\n{prefix}[Claude] {text}", flush=True)
                     elif item_type == "tool_use":
                         tool_name = item.get("name", "unknown")
                         tool_input = item.get("input", {})
                         # Show tool name and brief input summary
                         if tool_name == "Edit":
                             file_path = tool_input.get("file_path", "")
-                            print(f"\n[Tool: {tool_name}] {file_path}", flush=True)
+                            print(f"\n{prefix}[Tool: {tool_name}] {file_path}", flush=True)
                         elif tool_name == "Read":
                             file_path = tool_input.get("file_path", "")
-                            print(f"\n[Tool: {tool_name}] {file_path}", flush=True)
+                            print(f"\n{prefix}[Tool: {tool_name}] {file_path}", flush=True)
                         elif tool_name == "Bash":
                             cmd = tool_input.get("command", "")[:80]
-                            print(f"\n[Tool: {tool_name}] {cmd}", flush=True)
+                            print(f"\n{prefix}[Tool: {tool_name}] {cmd}", flush=True)
                         elif tool_name == "Grep":
                             pattern = tool_input.get("pattern", "")
-                            print(f"\n[Tool: {tool_name}] {pattern}", flush=True)
+                            print(f"\n{prefix}[Tool: {tool_name}] {pattern}", flush=True)
                         else:
-                            print(f"\n[Tool: {tool_name}]", flush=True)
+                            print(f"\n{prefix}[Tool: {tool_name}]", flush=True)
 
             elif msg_type == "user":
                 # Tool results or user messages
@@ -218,17 +243,17 @@ class ClaudeRunner:
                     if item.get("type") == "tool_result":
                         is_error = item.get("is_error", False)
                         status = "error" if is_error else "done"
-                        print(f"  [{status}]", flush=True)
+                        print(f"{prefix}  [{status}]", flush=True)
 
             elif msg_type == "result":
                 # Final result
                 result = data.get("result", "")
                 if result:
-                    print("\n" + "=" * 60, flush=True)
-                    print("[Result]", flush=True)
-                    print("-" * 60, flush=True)
-                    print(result, flush=True)
-                    print("=" * 60, flush=True)
+                    print(f"\n{prefix}" + "=" * 60, flush=True)
+                    print(f"{prefix}[Result]", flush=True)
+                    print(f"{prefix}" + "-" * 60, flush=True)
+                    self._print_prefixed(result)
+                    print(f"{prefix}" + "=" * 60, flush=True)
 
         except json.JSONDecodeError:
             pass
