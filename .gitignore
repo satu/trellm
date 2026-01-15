@@ -22,6 +22,8 @@ venv/
 
 # Node
 node_modules/
+dist/
+coverage/
 
 # IDE
 .idea/
