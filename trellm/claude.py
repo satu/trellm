@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -11,6 +12,11 @@ from .config import ClaudeConfig
 from .trello import TrelloCard
 
 logger = logging.getLogger(__name__)
+
+# Error patterns for Claude Code
+PROMPT_TOO_LONG_PATTERN = re.compile(r"prompt is too long: (\d+) tokens? > (\d+) maximum")
+RATE_LIMIT_PATTERN = re.compile(r"rate_limit_error")
+RATE_LIMIT_RESET_PATTERN = re.compile(r"resets?\s+(?:in\s+)?(\d+)\s*(hours?|minutes?|h|m|days?|d)", re.IGNORECASE)
 
 
 @dataclass
@@ -23,8 +29,28 @@ class ClaudeResult:
     output: str
 
 
+class PromptTooLongError(Exception):
+    """Raised when Claude Code reports prompt is too long."""
+
+    def __init__(self, message: str, tokens: int, maximum: int):
+        super().__init__(message)
+        self.tokens = tokens
+        self.maximum = maximum
+
+
+class RateLimitError(Exception):
+    """Raised when Claude Code hits rate limit."""
+
+    def __init__(self, message: str, reset_seconds: Optional[int] = None):
+        super().__init__(message)
+        self.reset_seconds = reset_seconds
+
+
 class ClaudeRunner:
     """Runs Claude Code as a subprocess."""
+
+    # Maximum retries for recoverable errors
+    MAX_RETRIES = 2
 
     def __init__(
         self,
@@ -38,6 +64,128 @@ class ClaudeRunner:
         self.verbose = verbose
         self.ready_list_id = ready_list_id
 
+    def _check_for_errors(self, stderr: str, stdout: str) -> None:
+        """Check output for known Claude Code errors.
+
+        Raises:
+            PromptTooLongError: If prompt exceeds token limit
+            RateLimitError: If rate limit is hit
+        """
+        combined = stderr + stdout
+
+        # Check for prompt too long
+        match = PROMPT_TOO_LONG_PATTERN.search(combined)
+        if match:
+            tokens = int(match.group(1))
+            maximum = int(match.group(2))
+            raise PromptTooLongError(
+                f"Prompt too long: {tokens} tokens > {maximum} maximum",
+                tokens=tokens,
+                maximum=maximum,
+            )
+
+        # Check for rate limit
+        if RATE_LIMIT_PATTERN.search(combined):
+            # Try to extract reset time
+            reset_seconds = None
+            reset_match = RATE_LIMIT_RESET_PATTERN.search(combined)
+            if reset_match:
+                value = int(reset_match.group(1))
+                unit = reset_match.group(2).lower()
+                if unit.startswith("h"):
+                    reset_seconds = value * 3600
+                elif unit.startswith("m"):
+                    reset_seconds = value * 60
+                elif unit.startswith("d"):
+                    reset_seconds = value * 86400
+            raise RateLimitError(
+                "Rate limit exceeded",
+                reset_seconds=reset_seconds,
+            )
+
+    async def _run_compact(
+        self,
+        session_id: str,
+        working_dir: Optional[str],
+        prefix: str,
+    ) -> Optional[str]:
+        """Run /compact command on a session to reduce context size.
+
+        Args:
+            session_id: The session ID to compact
+            working_dir: Working directory for Claude Code
+            prefix: Project prefix for logging
+
+        Returns:
+            New session ID if successful, None otherwise
+        """
+        logger.info("%sRunning /compact to reduce context size", prefix)
+
+        cmd = [
+            self.binary,
+            "-p",
+            "/compact",
+            "--resume",
+            session_id,
+            "--output-format",
+            "json",
+        ]
+
+        if self.yolo:
+            cmd.append("--dangerously-skip-permissions")
+
+        cwd = Path(working_dir).expanduser() if working_dir else None
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
+                limit=10 * 1024 * 1024,
+            )
+
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=120,  # Compact should be quick
+            )
+
+            if proc.returncode != 0:
+                logger.warning(
+                    "%s/compact failed with return code %d: %s",
+                    prefix,
+                    proc.returncode,
+                    stderr.decode(),
+                )
+                return None
+
+            # Parse output to get new session ID
+            output = stdout.decode()
+            for line in reversed(output.strip().split("\n")):
+                line = line.strip()
+                if line.startswith("{"):
+                    try:
+                        data = json.loads(line)
+                        if "session_id" in data:
+                            logger.info(
+                                "%s/compact successful, new session: %s",
+                                prefix,
+                                data["session_id"],
+                            )
+                            return data["session_id"]
+                    except json.JSONDecodeError:
+                        continue
+
+            logger.warning("%s/compact completed but no session ID found", prefix)
+            return None
+
+        except asyncio.TimeoutError:
+            logger.warning("%s/compact timed out", prefix)
+            return None
+        except Exception as e:
+            logger.warning("%s/compact failed: %s", prefix, e)
+            return None
+
     async def run(
         self,
         card: TrelloCard,
@@ -46,6 +194,10 @@ class ClaudeRunner:
         working_dir: Optional[str],
     ) -> ClaudeResult:
         """Run Claude Code as a subprocess with the given task.
+
+        Handles recoverable errors:
+        - Prompt too long: Runs /compact and retries
+        - Rate limit: Sleeps until reset time and retries
 
         Args:
             card: The Trello card with task details
@@ -60,6 +212,116 @@ class ClaudeRunner:
         # when multiple tasks run in parallel with different projects
         prefix = f"[{project}] " if project else ""
 
+        current_session_id = session_id
+        last_error: Optional[Exception] = None
+
+        for attempt in range(self.MAX_RETRIES + 1):
+            try:
+                return await self._run_once(
+                    card=card,
+                    project=project,
+                    session_id=current_session_id,
+                    working_dir=working_dir,
+                    prefix=prefix,
+                )
+            except PromptTooLongError as e:
+                last_error = e
+                if attempt >= self.MAX_RETRIES:
+                    logger.error(
+                        "%sPrompt too long after %d retries, giving up",
+                        prefix,
+                        self.MAX_RETRIES,
+                    )
+                    raise RuntimeError(f"Prompt too long: {e}") from e
+
+                # Need a session to compact
+                if not current_session_id:
+                    logger.error(
+                        "%sPrompt too long but no session to compact", prefix
+                    )
+                    raise RuntimeError(f"Prompt too long: {e}") from e
+
+                logger.warning(
+                    "%sPrompt too long (%d tokens > %d max), running /compact",
+                    prefix,
+                    e.tokens,
+                    e.maximum,
+                )
+
+                # Run /compact to reduce context
+                new_session_id = await self._run_compact(
+                    session_id=current_session_id,
+                    working_dir=working_dir,
+                    prefix=prefix,
+                )
+
+                if new_session_id:
+                    current_session_id = new_session_id
+                    logger.info("%sRetrying with compacted session", prefix)
+                else:
+                    logger.error("%s/compact failed, cannot retry", prefix)
+                    raise RuntimeError(f"Prompt too long and compact failed: {e}") from e
+
+            except RateLimitError as e:
+                last_error = e
+                if attempt >= self.MAX_RETRIES:
+                    logger.error(
+                        "%sRate limit after %d retries, giving up",
+                        prefix,
+                        self.MAX_RETRIES,
+                    )
+                    raise RuntimeError(f"Rate limit exceeded: {e}") from e
+
+                # Calculate sleep time
+                if e.reset_seconds:
+                    sleep_time = e.reset_seconds
+                    logger.warning(
+                        "%sRate limit hit, sleeping for %d seconds until reset",
+                        prefix,
+                        sleep_time,
+                    )
+                else:
+                    # Default to 5 minutes if reset time unknown
+                    sleep_time = 300
+                    logger.warning(
+                        "%sRate limit hit (no reset time), sleeping for %d seconds",
+                        prefix,
+                        sleep_time,
+                    )
+
+                await asyncio.sleep(sleep_time)
+                logger.info("%sRetrying after rate limit sleep", prefix)
+
+        # Should not reach here, but just in case
+        if last_error:
+            raise RuntimeError(f"Claude Code failed after retries: {last_error}")
+        raise RuntimeError("Claude Code failed after retries")
+
+    async def _run_once(
+        self,
+        card: TrelloCard,
+        project: str,
+        session_id: Optional[str],
+        working_dir: Optional[str],
+        prefix: str,
+    ) -> ClaudeResult:
+        """Run Claude Code once without retry logic.
+
+        Args:
+            card: The Trello card with task details
+            project: Project name (for logging)
+            session_id: Optional session ID to resume
+            working_dir: Working directory for Claude Code
+            prefix: Project prefix for logging
+
+        Returns:
+            ClaudeResult with success status, new session ID, and output
+
+        Raises:
+            PromptTooLongError: If prompt exceeds token limit
+            RateLimitError: If rate limit is hit
+            RuntimeError: For other errors
+        """
         # Build the prompt
         prompt = self._build_prompt(card)
 
@@ -161,7 +423,12 @@ class ClaudeRunner:
             await proc.wait()
             raise RuntimeError(f"Claude Code timed out after {self.timeout}s")
 
+        # Check for recoverable errors before checking return code
+        # (errors may appear in stderr even with non-zero exit)
         if proc.returncode != 0:
+            # Check for known recoverable errors
+            self._check_for_errors(stderr_output, output)
+            # If not a known error, raise generic error
             logger.error("Claude Code failed with return code %d", proc.returncode)
             logger.error("stderr: %s", stderr_output)
             raise RuntimeError(f"Claude Code failed: {stderr_output}")
