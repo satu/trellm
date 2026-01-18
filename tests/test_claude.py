@@ -1,6 +1,7 @@
 """Tests for claude module."""
 
 import asyncio
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -13,7 +14,9 @@ from trellm.claude import (
     PROMPT_TOO_LONG_DETAILED_PATTERN,
     PROMPT_TOO_LONG_SIMPLE_PATTERN,
     RATE_LIMIT_PATTERN,
-    RATE_LIMIT_RESET_PATTERN,
+    RATE_LIMIT_USER_PATTERN,
+    RATE_LIMIT_RESET_DURATION_PATTERN,
+    RATE_LIMIT_RESET_TIME_PATTERN,
 )
 from trellm.config import ClaudeConfig
 from trellm.trello import TrelloCard
@@ -192,46 +195,83 @@ class TestErrorPatterns:
         for msg in ["Prompt is too long", "prompt is too long", "PROMPT IS TOO LONG"]:
             assert PROMPT_TOO_LONG_SIMPLE_PATTERN.search(msg) is not None, f"Failed for: {msg}"
 
-    def test_rate_limit_pattern(self):
-        """Test rate limit error pattern matching."""
+    def test_rate_limit_api_pattern(self):
+        """Test rate limit API error pattern matching."""
         error_msg = '{"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s rate limit."}}'
         assert RATE_LIMIT_PATTERN.search(error_msg) is not None
 
-    def test_rate_limit_reset_pattern_hours(self):
-        """Test rate limit reset time parsing - hours."""
+    def test_rate_limit_user_pattern(self):
+        """Test rate limit user-facing pattern matching."""
+        error_msg = "You've hit your limit · resets 8pm (UTC)"
+        assert RATE_LIMIT_USER_PATTERN.search(error_msg) is not None
+
+    def test_rate_limit_user_pattern_case_insensitive(self):
+        """Test rate limit user pattern is case insensitive."""
+        for msg in ["You've hit your limit", "you've hit your limit", "YOU'VE HIT YOUR LIMIT"]:
+            assert RATE_LIMIT_USER_PATTERN.search(msg) is not None, f"Failed for: {msg}"
+
+    def test_rate_limit_reset_duration_pattern_hours(self):
+        """Test rate limit reset duration parsing - hours."""
         msg = "Session limit reached – resets in 2 hours"
-        match = RATE_LIMIT_RESET_PATTERN.search(msg)
+        match = RATE_LIMIT_RESET_DURATION_PATTERN.search(msg)
         assert match is not None
         assert match.group(1) == "2"
         assert match.group(2) == "hours"
 
-    def test_rate_limit_reset_pattern_minutes(self):
-        """Test rate limit reset time parsing - minutes."""
+    def test_rate_limit_reset_duration_pattern_minutes(self):
+        """Test rate limit reset duration parsing - minutes."""
         msg = "resets in 30 minutes"
-        match = RATE_LIMIT_RESET_PATTERN.search(msg)
+        match = RATE_LIMIT_RESET_DURATION_PATTERN.search(msg)
         assert match is not None
         assert match.group(1) == "30"
         assert match.group(2) == "minutes"
 
-    def test_rate_limit_reset_pattern_days(self):
-        """Test rate limit reset time parsing - days."""
+    def test_rate_limit_reset_duration_pattern_days(self):
+        """Test rate limit reset duration parsing - days."""
         msg = "Weekly limits reset 2 days"
-        match = RATE_LIMIT_RESET_PATTERN.search(msg)
+        match = RATE_LIMIT_RESET_DURATION_PATTERN.search(msg)
         assert match is not None
         assert match.group(1) == "2"
         assert match.group(2) == "days"
 
-    def test_rate_limit_reset_pattern_short_form(self):
+    def test_rate_limit_reset_duration_pattern_short_form(self):
         """Test rate limit reset with short form (h, m, d)."""
         for msg, expected_val, expected_unit in [
             ("resets in 2h", "2", "h"),
             ("resets in 30m", "30", "m"),
             ("resets in 1d", "1", "d"),
         ]:
-            match = RATE_LIMIT_RESET_PATTERN.search(msg)
+            match = RATE_LIMIT_RESET_DURATION_PATTERN.search(msg)
             assert match is not None, f"Failed for: {msg}"
             assert match.group(1) == expected_val
             assert match.group(2) == expected_unit
+
+    def test_rate_limit_reset_time_pattern_pm(self):
+        """Test rate limit reset clock time parsing - PM."""
+        msg = "You've hit your limit · resets 8pm (UTC)"
+        match = RATE_LIMIT_RESET_TIME_PATTERN.search(msg)
+        assert match is not None
+        assert match.group(1) == "8"
+        assert match.group(2) is None  # no minutes
+        assert match.group(3) == "pm"
+        assert match.group(4) == "UTC"
+
+    def test_rate_limit_reset_time_pattern_am(self):
+        """Test rate limit reset clock time parsing - AM."""
+        msg = "resets 10am"
+        match = RATE_LIMIT_RESET_TIME_PATTERN.search(msg)
+        assert match is not None
+        assert match.group(1) == "10"
+        assert match.group(3) == "am"
+
+    def test_rate_limit_reset_time_pattern_with_minutes(self):
+        """Test rate limit reset clock time parsing with minutes."""
+        msg = "resets 8:30pm (UTC)"
+        match = RATE_LIMIT_RESET_TIME_PATTERN.search(msg)
+        assert match is not None
+        assert match.group(1) == "8"
+        assert match.group(2) == "30"
+        assert match.group(3) == "pm"
 
 
 class TestClaudeRunnerErrorChecking:
@@ -320,6 +360,29 @@ class TestClaudeRunnerErrorChecking:
 
         # 2 days = 172800 seconds
         assert exc_info.value.reset_seconds == 172800
+
+    def test_check_for_rate_limit_user_facing_message(self, runner):
+        """Test detection of user-facing rate limit message."""
+        # This is the actual format from Claude Code output
+        stdout = '{"type":"result","result":"You\'ve hit your limit · resets 8pm (UTC)"}'
+
+        with pytest.raises(RateLimitError) as exc_info:
+            runner._check_for_errors("", stdout)
+
+        # Should have parsed the reset time
+        assert exc_info.value.reset_seconds is not None
+        # Reset time should be positive (some time in the future)
+        assert exc_info.value.reset_seconds > 0
+
+    def test_check_for_rate_limit_user_facing_no_utc(self, runner):
+        """Test detection of user-facing rate limit without UTC suffix."""
+        stdout = "You've hit your limit · resets 10am"
+
+        with pytest.raises(RateLimitError) as exc_info:
+            runner._check_for_errors("", stdout)
+
+        # Should have parsed the reset time
+        assert exc_info.value.reset_seconds is not None
 
     def test_no_error_on_success(self, runner):
         """Test that no error is raised on normal output."""

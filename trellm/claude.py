@@ -5,6 +5,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -18,8 +19,14 @@ logger = logging.getLogger(__name__)
 PROMPT_TOO_LONG_DETAILED_PATTERN = re.compile(r"prompt is too long: (\d+) tokens? > (\d+) maximum")
 # Simple pattern for when Claude just says "Prompt is too long"
 PROMPT_TOO_LONG_SIMPLE_PATTERN = re.compile(r"prompt is too long", re.IGNORECASE)
+# API error pattern for rate limits
 RATE_LIMIT_PATTERN = re.compile(r"rate_limit_error")
-RATE_LIMIT_RESET_PATTERN = re.compile(r"resets?\s+(?:in\s+)?(\d+)\s*(hours?|minutes?|h|m|days?|d)", re.IGNORECASE)
+# User-facing rate limit pattern (e.g., "You've hit your limit")
+RATE_LIMIT_USER_PATTERN = re.compile(r"you've hit your limit", re.IGNORECASE)
+# Reset time as duration (e.g., "resets in 2 hours", "resets in 30 minutes")
+RATE_LIMIT_RESET_DURATION_PATTERN = re.compile(r"resets?\s+(?:in\s+)?(\d+)\s*(hours?|minutes?|h|m|days?|d)", re.IGNORECASE)
+# Reset time as clock time (e.g., "resets 8pm (UTC)", "resets 10am")
+RATE_LIMIT_RESET_TIME_PATTERN = re.compile(r"resets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*(?:\(?(UTC|GMT)?\)?)?", re.IGNORECASE)
 
 
 @dataclass
@@ -104,24 +111,65 @@ class ClaudeRunner:
         if PROMPT_TOO_LONG_SIMPLE_PATTERN.search(combined):
             raise PromptTooLongError("Prompt is too long", session_id=session_id)
 
-        # Check for rate limit
-        if RATE_LIMIT_PATTERN.search(combined):
+        # Check for rate limit (API error or user-facing message)
+        if RATE_LIMIT_PATTERN.search(combined) or RATE_LIMIT_USER_PATTERN.search(combined):
             # Try to extract reset time
-            reset_seconds = None
-            reset_match = RATE_LIMIT_RESET_PATTERN.search(combined)
-            if reset_match:
-                value = int(reset_match.group(1))
-                unit = reset_match.group(2).lower()
-                if unit.startswith("h"):
-                    reset_seconds = value * 3600
-                elif unit.startswith("m"):
-                    reset_seconds = value * 60
-                elif unit.startswith("d"):
-                    reset_seconds = value * 86400
+            reset_seconds = self._parse_rate_limit_reset_time(combined)
             raise RateLimitError(
                 "Rate limit exceeded",
                 reset_seconds=reset_seconds,
             )
+
+    def _parse_rate_limit_reset_time(self, text: str) -> Optional[int]:
+        """Parse reset time from rate limit error message.
+
+        Supports two formats:
+        - Duration: "resets in 2 hours", "resets in 30 minutes"
+        - Clock time: "resets 8pm (UTC)", "resets 10am"
+
+        Args:
+            text: The error message text
+
+        Returns:
+            Seconds until reset, or None if cannot be parsed
+        """
+        # Try duration format first (e.g., "resets in 2 hours")
+        duration_match = RATE_LIMIT_RESET_DURATION_PATTERN.search(text)
+        if duration_match:
+            value = int(duration_match.group(1))
+            unit = duration_match.group(2).lower()
+            if unit.startswith("h"):
+                return value * 3600
+            elif unit.startswith("m"):
+                return value * 60
+            elif unit.startswith("d"):
+                return value * 86400
+
+        # Try clock time format (e.g., "resets 8pm (UTC)")
+        time_match = RATE_LIMIT_RESET_TIME_PATTERN.search(text)
+        if time_match:
+            hour = int(time_match.group(1))
+            minute = int(time_match.group(2)) if time_match.group(2) else 0
+            am_pm = time_match.group(3).lower()
+
+            # Convert to 24-hour format
+            if am_pm == "pm" and hour != 12:
+                hour += 12
+            elif am_pm == "am" and hour == 12:
+                hour = 0
+
+            # Calculate seconds until that time (assume UTC)
+            now = datetime.now(timezone.utc)
+            reset_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+            # If the time is in the past, assume it's tomorrow
+            if reset_time <= now:
+                reset_time = reset_time.replace(day=reset_time.day + 1)
+
+            delta = reset_time - now
+            return max(0, int(delta.total_seconds()))
+
+        return None
 
     async def _run_compact(
         self,
