@@ -14,7 +14,10 @@ from .trello import TrelloCard
 logger = logging.getLogger(__name__)
 
 # Error patterns for Claude Code
-PROMPT_TOO_LONG_PATTERN = re.compile(r"prompt is too long: (\d+) tokens? > (\d+) maximum")
+# Detailed pattern with token counts (e.g., "prompt is too long: 206453 tokens > 200000 maximum")
+PROMPT_TOO_LONG_DETAILED_PATTERN = re.compile(r"prompt is too long: (\d+) tokens? > (\d+) maximum")
+# Simple pattern for when Claude just says "Prompt is too long"
+PROMPT_TOO_LONG_SIMPLE_PATTERN = re.compile(r"prompt is too long", re.IGNORECASE)
 RATE_LIMIT_PATTERN = re.compile(r"rate_limit_error")
 RATE_LIMIT_RESET_PATTERN = re.compile(r"resets?\s+(?:in\s+)?(\d+)\s*(hours?|minutes?|h|m|days?|d)", re.IGNORECASE)
 
@@ -32,7 +35,7 @@ class ClaudeResult:
 class PromptTooLongError(Exception):
     """Raised when Claude Code reports prompt is too long."""
 
-    def __init__(self, message: str, tokens: int, maximum: int):
+    def __init__(self, message: str, tokens: Optional[int] = None, maximum: Optional[int] = None):
         super().__init__(message)
         self.tokens = tokens
         self.maximum = maximum
@@ -73,8 +76,8 @@ class ClaudeRunner:
         """
         combined = stderr + stdout
 
-        # Check for prompt too long
-        match = PROMPT_TOO_LONG_PATTERN.search(combined)
+        # Check for prompt too long - try detailed pattern first for token counts
+        match = PROMPT_TOO_LONG_DETAILED_PATTERN.search(combined)
         if match:
             tokens = int(match.group(1))
             maximum = int(match.group(2))
@@ -83,6 +86,10 @@ class ClaudeRunner:
                 tokens=tokens,
                 maximum=maximum,
             )
+
+        # Fall back to simple pattern (no token counts)
+        if PROMPT_TOO_LONG_SIMPLE_PATTERN.search(combined):
+            raise PromptTooLongError("Prompt is too long")
 
         # Check for rate limit
         if RATE_LIMIT_PATTERN.search(combined):
@@ -241,12 +248,18 @@ class ClaudeRunner:
                     )
                     raise RuntimeError(f"Prompt too long: {e}") from e
 
-                logger.warning(
-                    "%sPrompt too long (%d tokens > %d max), running /compact",
-                    prefix,
-                    e.tokens,
-                    e.maximum,
-                )
+                if e.tokens and e.maximum:
+                    logger.warning(
+                        "%sPrompt too long (%d tokens > %d max), running /compact",
+                        prefix,
+                        e.tokens,
+                        e.maximum,
+                    )
+                else:
+                    logger.warning(
+                        "%sPrompt too long, running /compact",
+                        prefix,
+                    )
 
                 # Run /compact to reduce context
                 new_session_id = await self._run_compact(

@@ -10,7 +10,8 @@ from trellm.claude import (
     ClaudeResult,
     PromptTooLongError,
     RateLimitError,
-    PROMPT_TOO_LONG_PATTERN,
+    PROMPT_TOO_LONG_DETAILED_PATTERN,
+    PROMPT_TOO_LONG_SIMPLE_PATTERN,
     RATE_LIMIT_PATTERN,
     RATE_LIMIT_RESET_PATTERN,
 )
@@ -165,20 +166,31 @@ Or maybe malformed { json
 class TestErrorPatterns:
     """Tests for error detection regex patterns."""
 
-    def test_prompt_too_long_pattern(self):
-        """Test prompt too long error pattern matching."""
+    def test_prompt_too_long_detailed_pattern(self):
+        """Test prompt too long error pattern matching with token counts."""
         error_msg = 'Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 206453 tokens > 200000 maximum"}}'
-        match = PROMPT_TOO_LONG_PATTERN.search(error_msg)
+        match = PROMPT_TOO_LONG_DETAILED_PATTERN.search(error_msg)
         assert match is not None
         assert match.group(1) == "206453"
         assert match.group(2) == "200000"
 
-    def test_prompt_too_long_pattern_singular_token(self):
+    def test_prompt_too_long_detailed_pattern_singular_token(self):
         """Test prompt too long with singular 'token'."""
         error_msg = "prompt is too long: 1 token > 200000 maximum"
-        match = PROMPT_TOO_LONG_PATTERN.search(error_msg)
+        match = PROMPT_TOO_LONG_DETAILED_PATTERN.search(error_msg)
         assert match is not None
         assert match.group(1) == "1"
+
+    def test_prompt_too_long_simple_pattern(self):
+        """Test simple 'Prompt is too long' message from Claude result."""
+        # This is the actual format from Claude Code when it hits the limit
+        error_msg = '{"type":"result","result":"Prompt is too long"}'
+        assert PROMPT_TOO_LONG_SIMPLE_PATTERN.search(error_msg) is not None
+
+    def test_prompt_too_long_simple_pattern_case_insensitive(self):
+        """Test simple pattern is case insensitive."""
+        for msg in ["Prompt is too long", "prompt is too long", "PROMPT IS TOO LONG"]:
+            assert PROMPT_TOO_LONG_SIMPLE_PATTERN.search(msg) is not None, f"Failed for: {msg}"
 
     def test_rate_limit_pattern(self):
         """Test rate limit error pattern matching."""
@@ -236,8 +248,8 @@ class TestClaudeRunnerErrorChecking:
         )
         return ClaudeRunner(config)
 
-    def test_check_for_prompt_too_long_error(self, runner):
-        """Test detection of prompt too long error."""
+    def test_check_for_prompt_too_long_error_detailed(self, runner):
+        """Test detection of prompt too long error with token counts."""
         stderr = 'Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 250000 tokens > 200000 maximum"}}'
 
         with pytest.raises(PromptTooLongError) as exc_info:
@@ -245,6 +257,18 @@ class TestClaudeRunnerErrorChecking:
 
         assert exc_info.value.tokens == 250000
         assert exc_info.value.maximum == 200000
+
+    def test_check_for_prompt_too_long_error_simple(self, runner):
+        """Test detection of simple 'Prompt is too long' from result."""
+        # This simulates the actual format from Claude Code output
+        stdout = '{"type":"result","result":"Prompt is too long"}'
+
+        with pytest.raises(PromptTooLongError) as exc_info:
+            runner._check_for_errors("", stdout)
+
+        # Simple format has no token counts
+        assert exc_info.value.tokens is None
+        assert exc_info.value.maximum is None
 
     def test_check_for_rate_limit_error(self, runner):
         """Test detection of rate limit error."""
@@ -459,6 +483,40 @@ class TestClaudeRunnerRetryLogic:
                     session_id=None,  # No session to compact
                     working_dir="/tmp/test",
                 )
+
+    @pytest.mark.asyncio
+    async def test_run_prompt_too_long_simple_retry_with_compact(self, runner, mock_card):
+        """Test retry after simple 'Prompt is too long' error (no token counts)."""
+        expected_result = ClaudeResult(
+            success=True,
+            session_id="session-after-compact",
+            summary="Task completed",
+            output="{}",
+        )
+
+        call_count = 0
+
+        async def mock_run_once(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Simple error without token counts (as from actual Claude output)
+                raise PromptTooLongError("Prompt is too long")
+            return expected_result
+
+        with patch.object(runner, "_run_once", side_effect=mock_run_once):
+            with patch.object(
+                runner, "_run_compact", return_value="compacted-session"
+            ) as mock_compact:
+                result = await runner.run(
+                    card=mock_card,
+                    project="test",
+                    session_id="old-session",
+                    working_dir="/tmp/test",
+                )
+
+        assert result == expected_result
+        mock_compact.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_run_rate_limit_retry_after_sleep(self, runner, mock_card):
