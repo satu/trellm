@@ -257,6 +257,7 @@ class TestClaudeRunnerErrorChecking:
 
         assert exc_info.value.tokens == 250000
         assert exc_info.value.maximum == 200000
+        assert exc_info.value.session_id is None  # No session_id passed
 
     def test_check_for_prompt_too_long_error_simple(self, runner):
         """Test detection of simple 'Prompt is too long' from result."""
@@ -269,6 +270,16 @@ class TestClaudeRunnerErrorChecking:
         # Simple format has no token counts
         assert exc_info.value.tokens is None
         assert exc_info.value.maximum is None
+        assert exc_info.value.session_id is None  # No session_id passed
+
+    def test_check_for_prompt_too_long_error_with_session_id(self, runner):
+        """Test that session_id is captured in PromptTooLongError."""
+        stdout = '{"type":"result","result":"Prompt is too long"}'
+
+        with pytest.raises(PromptTooLongError) as exc_info:
+            runner._check_for_errors("", stdout, session_id="test-session-123")
+
+        assert exc_info.value.session_id == "test-session-123"
 
     def test_check_for_rate_limit_error(self, runner):
         """Test detection of rate limit error."""

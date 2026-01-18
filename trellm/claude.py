@@ -35,10 +35,17 @@ class ClaudeResult:
 class PromptTooLongError(Exception):
     """Raised when Claude Code reports prompt is too long."""
 
-    def __init__(self, message: str, tokens: Optional[int] = None, maximum: Optional[int] = None):
+    def __init__(
+        self,
+        message: str,
+        tokens: Optional[int] = None,
+        maximum: Optional[int] = None,
+        session_id: Optional[str] = None,
+    ):
         super().__init__(message)
         self.tokens = tokens
         self.maximum = maximum
+        self.session_id = session_id  # The session that hit the limit
 
 
 class RateLimitError(Exception):
@@ -67,8 +74,13 @@ class ClaudeRunner:
         self.verbose = verbose
         self.ready_list_id = ready_list_id
 
-    def _check_for_errors(self, stderr: str, stdout: str) -> None:
+    def _check_for_errors(self, stderr: str, stdout: str, session_id: Optional[str] = None) -> None:
         """Check output for known Claude Code errors.
+
+        Args:
+            stderr: Standard error output
+            stdout: Standard output
+            session_id: Session ID from the output (for error context)
 
         Raises:
             PromptTooLongError: If prompt exceeds token limit
@@ -85,11 +97,12 @@ class ClaudeRunner:
                 f"Prompt too long: {tokens} tokens > {maximum} maximum",
                 tokens=tokens,
                 maximum=maximum,
+                session_id=session_id,
             )
 
         # Fall back to simple pattern (no token counts)
         if PROMPT_TOO_LONG_SIMPLE_PATTERN.search(combined):
-            raise PromptTooLongError("Prompt is too long")
+            raise PromptTooLongError("Prompt is too long", session_id=session_id)
 
         # Check for rate limit
         if RATE_LIMIT_PATTERN.search(combined):
@@ -241,8 +254,11 @@ class ClaudeRunner:
                     )
                     raise RuntimeError(f"Prompt too long: {e}") from e
 
+                # Use the session_id from the error if available, otherwise use current
+                session_to_compact = e.session_id or current_session_id
+
                 # Need a session to compact
-                if not current_session_id:
+                if not session_to_compact:
                     logger.error(
                         "%sPrompt too long but no session to compact", prefix
                     )
@@ -250,20 +266,22 @@ class ClaudeRunner:
 
                 if e.tokens and e.maximum:
                     logger.warning(
-                        "%sPrompt too long (%d tokens > %d max), running /compact",
+                        "%sPrompt too long (%d tokens > %d max), running /compact on session %s",
                         prefix,
                         e.tokens,
                         e.maximum,
+                        session_to_compact,
                     )
                 else:
                     logger.warning(
-                        "%sPrompt too long, running /compact",
+                        "%sPrompt too long, running /compact on session %s",
                         prefix,
+                        session_to_compact,
                     )
 
-                # Run /compact to reduce context
+                # Run /compact to reduce context on the session that hit the limit
                 new_session_id = await self._run_compact(
-                    session_id=current_session_id,
+                    session_id=session_to_compact,
                     working_dir=working_dir,
                     prefix=prefix,
                 )
@@ -439,8 +457,22 @@ class ClaudeRunner:
         # Check for recoverable errors before checking return code
         # (errors may appear in stderr even with non-zero exit)
         if proc.returncode != 0:
-            # Check for known recoverable errors
-            self._check_for_errors(stderr_output, output)
+            # Try to extract session_id from output even on failure
+            # This is critical for /compact to work on the correct session
+            failed_session_id = None
+            for line in reversed(output.strip().split("\n")):
+                line = line.strip()
+                if line.startswith("{"):
+                    try:
+                        data = json.loads(line)
+                        if "session_id" in data:
+                            failed_session_id = data["session_id"]
+                            break
+                    except json.JSONDecodeError:
+                        continue
+
+            # Check for known recoverable errors, passing the session_id
+            self._check_for_errors(stderr_output, output, session_id=failed_session_id)
             # If not a known error, raise generic error
             logger.error("Claude Code failed with return code %d", proc.returncode)
             logger.error("stderr: %s", stderr_output)
