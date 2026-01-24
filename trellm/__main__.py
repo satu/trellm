@@ -143,11 +143,12 @@ async def process_cards(
 
         logger.info("Processing card %s for project %s: %s", card.id, project, card.name)
 
-        # Get session ID for this project
+        # Get session ID and last card ID for this project
         # Priority: 1) state file (from previous runs), 2) config file (initial setup)
         session_id = state.get_session(project)
         if not session_id:
             session_id = config.get_initial_session_id(project)
+        last_card_id = state.get_last_card_id(project)
 
         # Run Claude Code
         try:
@@ -156,11 +157,12 @@ async def process_cards(
                 project=project,
                 session_id=session_id,
                 working_dir=config.get_working_dir(project),
+                last_card_id=last_card_id,
             )
 
-            # Update session ID for next task
+            # Update session ID and last card ID for next task
             if result.session_id:
-                state.set_session(project, result.session_id)
+                state.set_session(project, result.session_id, last_card_id=card.id)
 
             # Mark as processed and move card
             state.mark_processed(card.id)
@@ -198,10 +200,11 @@ async def process_card_for_project(
             card.name,
         )
 
-        # Get session ID for this project
+        # Get session ID and last card ID for this project
         session_id = state.get_session(project)
         if not session_id:
             session_id = config.get_initial_session_id(project)
+        last_card_id = state.get_last_card_id(project)
 
         # Run Claude Code
         try:
@@ -210,11 +213,12 @@ async def process_card_for_project(
                 project=project,
                 session_id=session_id,
                 working_dir=config.get_working_dir(project),
+                last_card_id=last_card_id,
             )
 
-            # Update session ID for next task
+            # Update session ID and last card ID for next task
             if result.session_id:
-                state.set_session(project, result.session_id)
+                state.set_session(project, result.session_id, last_card_id=card.id)
 
             # Mark as processed and move card
             state.mark_processed(card.id)

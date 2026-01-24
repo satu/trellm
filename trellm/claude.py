@@ -30,6 +30,17 @@ RATE_LIMIT_RESET_TIME_PATTERN = re.compile(r"resets?\s+(\d{1,2})(?::(\d{2}))?\s*
 
 
 @dataclass
+class CostInfo:
+    """Cost and usage information from Claude Code /cost command."""
+
+    total_cost: Optional[str] = None
+    api_duration: Optional[str] = None
+    wall_duration: Optional[str] = None
+    code_changes: Optional[str] = None
+    raw_output: Optional[str] = None
+
+
+@dataclass
 class ClaudeResult:
     """Result from a Claude Code execution."""
 
@@ -37,6 +48,7 @@ class ClaudeResult:
     session_id: Optional[str]
     summary: str
     output: str
+    cost_info: Optional[CostInfo] = None
 
 
 class PromptTooLongError(Exception):
@@ -254,12 +266,94 @@ class ClaudeRunner:
             logger.warning("%s/compact failed: %s", prefix, e)
             return None
 
+    async def _run_cost(
+        self,
+        session_id: str,
+        working_dir: Optional[str],
+        prefix: str,
+    ) -> Optional[CostInfo]:
+        """Run /cost command on a session to get usage statistics.
+
+        Args:
+            session_id: The session ID to get cost for
+            working_dir: Working directory for Claude Code
+            prefix: Project prefix for logging
+
+        Returns:
+            CostInfo with usage statistics, or None if failed
+        """
+        cmd = [
+            self.binary,
+            "-p",
+            "/cost",
+            "--resume",
+            session_id,
+            "--output-format",
+            "json",
+        ]
+
+        if self.yolo:
+            cmd.append("--dangerously-skip-permissions")
+
+        cwd = Path(working_dir).expanduser() if working_dir else None
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
+                limit=10 * 1024 * 1024,
+            )
+
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=30,  # Cost check should be very quick
+            )
+
+            output = stdout.decode()
+
+            # Parse the result to extract cost info
+            # The /cost output is typically in the result field as formatted text
+            cost_info = CostInfo(raw_output=output)
+
+            for line in output.strip().split("\n"):
+                line = line.strip()
+                if line.startswith("{"):
+                    try:
+                        data = json.loads(line)
+                        if "result" in data:
+                            result_text = data["result"]
+                            # Parse the formatted cost output
+                            for result_line in result_text.split("\n"):
+                                result_line = result_line.strip()
+                                if result_line.startswith("Total cost:"):
+                                    cost_info.total_cost = result_line.split(":", 1)[1].strip()
+                                elif result_line.startswith("Total duration (API):"):
+                                    cost_info.api_duration = result_line.split(":", 1)[1].strip()
+                                elif result_line.startswith("Total duration (wall):"):
+                                    cost_info.wall_duration = result_line.split(":", 1)[1].strip()
+                                elif result_line.startswith("Total code changes:"):
+                                    cost_info.code_changes = result_line.split(":", 1)[1].strip()
+                    except json.JSONDecodeError:
+                        continue
+
+            return cost_info
+
+        except asyncio.TimeoutError:
+            logger.warning("%s/cost timed out", prefix)
+            return None
+        except Exception as e:
+            logger.warning("%s/cost failed: %s", prefix, e)
+            return None
+
     async def run(
         self,
         card: TrelloCard,
         project: str,
         session_id: Optional[str],
         working_dir: Optional[str],
+        last_card_id: Optional[str] = None,
     ) -> ClaudeResult:
         """Run Claude Code as a subprocess with the given task.
 
@@ -267,11 +361,16 @@ class ClaudeRunner:
         - Prompt too long: Runs /compact and retries
         - Rate limit: Sleeps until reset time and retries
 
+        Pre-compacts the session if:
+        - There is an existing session
+        - This is a different card than the last one processed
+
         Args:
             card: The Trello card with task details
             project: Project name (for logging)
             session_id: Optional session ID to resume
             working_dir: Working directory for Claude Code
+            last_card_id: Optional card ID of the last processed card for this project
 
         Returns:
             ClaudeResult with success status, new session ID, and output
@@ -281,17 +380,59 @@ class ClaudeRunner:
         prefix = f"[{project}] " if project else ""
 
         current_session_id = session_id
+
+        # Pre-compact if we have an existing session and this is a new card
+        if current_session_id and (last_card_id is None or card.id != last_card_id):
+            logger.info(
+                "%sPre-compacting session before new ticket (last card: %s, new card: %s)",
+                prefix,
+                last_card_id or "none",
+                card.id,
+            )
+            new_session_id = await self._run_compact(
+                session_id=current_session_id,
+                working_dir=working_dir,
+                prefix=prefix,
+            )
+            if new_session_id:
+                current_session_id = new_session_id
+                logger.info("%sUsing compacted session for new ticket", prefix)
+            else:
+                logger.warning(
+                    "%sPre-compaction failed, continuing with original session", prefix
+                )
+
         last_error: Optional[Exception] = None
 
         for attempt in range(self.MAX_RETRIES + 1):
             try:
-                return await self._run_once(
+                result = await self._run_once(
                     card=card,
                     project=project,
                     session_id=current_session_id,
                     working_dir=working_dir,
                     prefix=prefix,
                 )
+
+                # Get cost info after successful execution
+                if result.session_id:
+                    cost_info = await self._run_cost(
+                        session_id=result.session_id,
+                        working_dir=working_dir,
+                        prefix=prefix,
+                    )
+                    result.cost_info = cost_info
+                    if cost_info:
+                        logger.info(
+                            "%sSession cost: %s | API duration: %s | Wall duration: %s | Changes: %s",
+                            prefix,
+                            cost_info.total_cost or "N/A",
+                            cost_info.api_duration or "N/A",
+                            cost_info.wall_duration or "N/A",
+                            cost_info.code_changes or "N/A",
+                        )
+
+                return result
             except PromptTooLongError as e:
                 last_error = e
                 if attempt >= self.MAX_RETRIES:

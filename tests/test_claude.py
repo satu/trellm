@@ -9,6 +9,7 @@ import pytest
 from trellm.claude import (
     ClaudeRunner,
     ClaudeResult,
+    CostInfo,
     PromptTooLongError,
     RateLimitError,
     PROMPT_TOO_LONG_DETAILED_PATTERN,
@@ -500,12 +501,14 @@ class TestClaudeRunnerRetryLogic:
         )
 
         with patch.object(runner, "_run_once", return_value=expected_result) as mock_run:
-            result = await runner.run(
-                card=mock_card,
-                project="test",
-                session_id="old-session",
-                working_dir="/tmp/test",
-            )
+            with patch.object(runner, "_run_compact", return_value="compacted-session"):
+                with patch.object(runner, "_run_cost", return_value=None):
+                    result = await runner.run(
+                        card=mock_card,
+                        project="test",
+                        session_id="old-session",
+                        working_dir="/tmp/test",
+                    )
 
         assert result == expected_result
         mock_run.assert_called_once()
@@ -533,14 +536,17 @@ class TestClaudeRunnerRetryLogic:
             with patch.object(
                 runner, "_run_compact", return_value="compacted-session"
             ) as mock_compact:
-                result = await runner.run(
-                    card=mock_card,
-                    project="test",
-                    session_id="old-session",
-                    working_dir="/tmp/test",
-                )
+                with patch.object(runner, "_run_cost", return_value=None):
+                    result = await runner.run(
+                        card=mock_card,
+                        project="test",
+                        session_id="old-session",
+                        working_dir="/tmp/test",
+                        last_card_id=mock_card.id,  # Same card to skip pre-compaction
+                    )
 
         assert result == expected_result
+        # Called once for error recovery (not for pre-compaction since same card)
         mock_compact.assert_called_once()
 
     @pytest.mark.asyncio
@@ -550,13 +556,14 @@ class TestClaudeRunnerRetryLogic:
             raise PromptTooLongError("Too long", tokens=250000, maximum=200000)
 
         with patch.object(runner, "_run_once", side_effect=mock_run_once):
-            with pytest.raises(RuntimeError, match="Prompt too long"):
-                await runner.run(
-                    card=mock_card,
-                    project="test",
-                    session_id=None,  # No session to compact
-                    working_dir="/tmp/test",
-                )
+            with patch.object(runner, "_run_cost", return_value=None):
+                with pytest.raises(RuntimeError, match="Prompt too long"):
+                    await runner.run(
+                        card=mock_card,
+                        project="test",
+                        session_id=None,  # No session to compact
+                        working_dir="/tmp/test",
+                    )
 
     @pytest.mark.asyncio
     async def test_run_prompt_too_long_simple_retry_with_compact(self, runner, mock_card):
@@ -582,14 +589,17 @@ class TestClaudeRunnerRetryLogic:
             with patch.object(
                 runner, "_run_compact", return_value="compacted-session"
             ) as mock_compact:
-                result = await runner.run(
-                    card=mock_card,
-                    project="test",
-                    session_id="old-session",
-                    working_dir="/tmp/test",
-                )
+                with patch.object(runner, "_run_cost", return_value=None):
+                    result = await runner.run(
+                        card=mock_card,
+                        project="test",
+                        session_id="old-session",
+                        working_dir="/tmp/test",
+                        last_card_id=mock_card.id,  # Same card to skip pre-compaction
+                    )
 
         assert result == expected_result
+        # Called once for error recovery (not for pre-compaction since same card)
         mock_compact.assert_called_once()
 
     @pytest.mark.asyncio
@@ -613,13 +623,15 @@ class TestClaudeRunnerRetryLogic:
             return expected_result
 
         with patch.object(runner, "_run_once", side_effect=mock_run_once):
-            with patch("asyncio.sleep") as mock_sleep:
-                result = await runner.run(
-                    card=mock_card,
-                    project="test",
-                    session_id="session",
-                    working_dir="/tmp/test",
-                )
+            with patch.object(runner, "_run_compact", return_value="compacted-session"):
+                with patch.object(runner, "_run_cost", return_value=None):
+                    with patch("asyncio.sleep") as mock_sleep:
+                        result = await runner.run(
+                            card=mock_card,
+                            project="test",
+                            session_id="session",
+                            working_dir="/tmp/test",
+                        )
 
         assert result == expected_result
         mock_sleep.assert_called_once_with(1)
@@ -645,13 +657,15 @@ class TestClaudeRunnerRetryLogic:
             return expected_result
 
         with patch.object(runner, "_run_once", side_effect=mock_run_once):
-            with patch("asyncio.sleep") as mock_sleep:
-                result = await runner.run(
-                    card=mock_card,
-                    project="test",
-                    session_id="session",
-                    working_dir="/tmp/test",
-                )
+            with patch.object(runner, "_run_compact", return_value="compacted-session"):
+                with patch.object(runner, "_run_cost", return_value=None):
+                    with patch("asyncio.sleep") as mock_sleep:
+                        result = await runner.run(
+                            card=mock_card,
+                            project="test",
+                            session_id="session",
+                            working_dir="/tmp/test",
+                        )
 
         assert result == expected_result
         # Default is 300 seconds (5 minutes)
@@ -664,11 +678,264 @@ class TestClaudeRunnerRetryLogic:
             raise RateLimitError("Rate limit", reset_seconds=1)
 
         with patch.object(runner, "_run_once", side_effect=mock_run_once):
-            with patch("asyncio.sleep"):
-                with pytest.raises(RuntimeError, match="Rate limit exceeded"):
+            with patch.object(runner, "_run_compact", return_value="compacted-session"):
+                with patch.object(runner, "_run_cost", return_value=None):
+                    with patch("asyncio.sleep"):
+                        with pytest.raises(RuntimeError, match="Rate limit exceeded"):
+                            await runner.run(
+                                card=mock_card,
+                                project="test",
+                                session_id="session",
+                                working_dir="/tmp/test",
+                            )
+
+
+class TestClaudeRunnerCost:
+    """Tests for the /cost functionality."""
+
+    @pytest.fixture
+    def runner(self):
+        """Create a ClaudeRunner instance."""
+        config = ClaudeConfig(
+            binary="claude",
+            timeout=60,
+            yolo=True,
+            projects={},
+        )
+        return ClaudeRunner(config)
+
+    @pytest.mark.asyncio
+    async def test_run_cost_success(self, runner):
+        """Test successful /cost execution."""
+        cost_output = "Total cost:            $0.55\\nTotal duration (API):  6m 19.7s\\nTotal duration (wall): 6h 33m 10.2s\\nTotal code changes:    150 lines added, 20 lines removed"
+
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate = AsyncMock(
+            return_value=(
+                f'{{"type":"result","result":"{cost_output}"}}\n'.encode(),
+                b"",
+            )
+        )
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            result = await runner._run_cost(
+                session_id="test-session",
+                working_dir="/tmp/test",
+                prefix="[test] ",
+            )
+
+        assert result is not None
+        assert result.total_cost == "$0.55"
+        assert result.api_duration == "6m 19.7s"
+        assert result.wall_duration == "6h 33m 10.2s"
+        assert result.code_changes == "150 lines added, 20 lines removed"
+
+    @pytest.mark.asyncio
+    async def test_run_cost_timeout(self, runner):
+        """Test /cost timeout handling."""
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(
+            side_effect=asyncio.TimeoutError()
+        )
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            result = await runner._run_cost(
+                session_id="test-session",
+                working_dir="/tmp/test",
+                prefix="[test] ",
+            )
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_run_cost_failure(self, runner):
+        """Test /cost failure handling."""
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(
+            side_effect=Exception("Some error")
+        )
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            result = await runner._run_cost(
+                session_id="test-session",
+                working_dir="/tmp/test",
+                prefix="[test] ",
+            )
+
+        assert result is None
+
+
+class TestClaudeRunnerPreCompaction:
+    """Tests for pre-task compaction functionality."""
+
+    @pytest.fixture
+    def runner(self):
+        """Create a ClaudeRunner instance."""
+        config = ClaudeConfig(
+            binary="claude",
+            timeout=60,
+            yolo=True,
+            projects={},
+        )
+        return ClaudeRunner(config)
+
+    @pytest.fixture
+    def mock_card(self):
+        """Create a mock TrelloCard."""
+        return TrelloCard(
+            id="new-card-456",
+            name="Test Card",
+            description="Test description",
+            url="https://trello.com/c/abc123",
+            last_activity="2026-01-01T00:00:00Z",
+        )
+
+    @pytest.mark.asyncio
+    async def test_pre_compaction_with_new_card(self, runner, mock_card):
+        """Test that pre-compaction runs when processing a different card."""
+        expected_result = ClaudeResult(
+            success=True,
+            session_id="session-123",
+            summary="Task completed",
+            output="{}",
+        )
+
+        with patch.object(runner, "_run_once", return_value=expected_result):
+            with patch.object(runner, "_run_compact", return_value="compacted-session") as mock_compact:
+                with patch.object(runner, "_run_cost", return_value=None):
                     await runner.run(
                         card=mock_card,
                         project="test",
-                        session_id="session",
+                        session_id="old-session",
                         working_dir="/tmp/test",
+                        last_card_id="previous-card-123",  # Different from mock_card.id
                     )
+
+        # Should have called compact because card IDs are different
+        mock_compact.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_no_pre_compaction_with_same_card(self, runner, mock_card):
+        """Test that pre-compaction doesn't run when processing the same card."""
+        expected_result = ClaudeResult(
+            success=True,
+            session_id="session-123",
+            summary="Task completed",
+            output="{}",
+        )
+
+        with patch.object(runner, "_run_once", return_value=expected_result):
+            with patch.object(runner, "_run_compact", return_value="compacted-session") as mock_compact:
+                with patch.object(runner, "_run_cost", return_value=None):
+                    await runner.run(
+                        card=mock_card,
+                        project="test",
+                        session_id="old-session",
+                        working_dir="/tmp/test",
+                        last_card_id=mock_card.id,  # Same as mock_card.id
+                    )
+
+        # Should NOT have called compact because card IDs are the same
+        mock_compact.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_pre_compaction_without_session(self, runner, mock_card):
+        """Test that pre-compaction doesn't run without an existing session."""
+        expected_result = ClaudeResult(
+            success=True,
+            session_id="new-session",
+            summary="Task completed",
+            output="{}",
+        )
+
+        with patch.object(runner, "_run_once", return_value=expected_result):
+            with patch.object(runner, "_run_compact", return_value="compacted-session") as mock_compact:
+                with patch.object(runner, "_run_cost", return_value=None):
+                    await runner.run(
+                        card=mock_card,
+                        project="test",
+                        session_id=None,  # No existing session
+                        working_dir="/tmp/test",
+                        last_card_id="previous-card-123",
+                    )
+
+        # Should NOT have called compact because no session to compact
+        mock_compact.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_pre_compaction_with_no_last_card(self, runner, mock_card):
+        """Test that pre-compaction runs when last_card_id is None (first card)."""
+        expected_result = ClaudeResult(
+            success=True,
+            session_id="session-123",
+            summary="Task completed",
+            output="{}",
+        )
+
+        with patch.object(runner, "_run_once", return_value=expected_result):
+            with patch.object(runner, "_run_compact", return_value="compacted-session") as mock_compact:
+                with patch.object(runner, "_run_cost", return_value=None):
+                    await runner.run(
+                        card=mock_card,
+                        project="test",
+                        session_id="old-session",
+                        working_dir="/tmp/test",
+                        last_card_id=None,  # No previous card
+                    )
+
+        # Should have called compact because this is the first card for existing session
+        mock_compact.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_pre_compaction_failure_continues(self, runner, mock_card):
+        """Test that processing continues even if pre-compaction fails."""
+        expected_result = ClaudeResult(
+            success=True,
+            session_id="session-123",
+            summary="Task completed",
+            output="{}",
+        )
+
+        with patch.object(runner, "_run_once", return_value=expected_result) as mock_run:
+            with patch.object(runner, "_run_compact", return_value=None):  # Compact fails
+                with patch.object(runner, "_run_cost", return_value=None):
+                    result = await runner.run(
+                        card=mock_card,
+                        project="test",
+                        session_id="old-session",
+                        working_dir="/tmp/test",
+                        last_card_id="previous-card-123",
+                    )
+
+        # Should still have run the task
+        mock_run.assert_called_once()
+        assert result == expected_result
+
+    @pytest.mark.asyncio
+    async def test_cost_info_attached_to_result(self, runner, mock_card):
+        """Test that cost info is attached to the result."""
+        expected_result = ClaudeResult(
+            success=True,
+            session_id="session-123",
+            summary="Task completed",
+            output="{}",
+        )
+        cost_info = CostInfo(
+            total_cost="$0.50",
+            api_duration="5m",
+            wall_duration="30m",
+            code_changes="100 lines",
+        )
+
+        with patch.object(runner, "_run_once", return_value=expected_result):
+            with patch.object(runner, "_run_cost", return_value=cost_info):
+                result = await runner.run(
+                    card=mock_card,
+                    project="test",
+                    session_id=None,
+                    working_dir="/tmp/test",
+                )
+
+        assert result.cost_info == cost_info
+        assert result.cost_info.total_cost == "$0.50"

@@ -40,13 +40,27 @@ class StateManager:
         session = self.state.get("sessions", {}).get(project)
         return session.get("session_id") if session else None
 
-    def set_session(self, project: str, session_id: str) -> None:
-        """Store session ID for a project."""
-        self.state.setdefault("sessions", {})[project] = {
-            "session_id": session_id,
-            "last_activity": datetime.now(timezone.utc).isoformat(),
-        }
+    def set_session(
+        self, project: str, session_id: str, last_card_id: Optional[str] = None
+    ) -> None:
+        """Store session ID for a project.
+
+        Args:
+            project: Project name
+            session_id: The Claude Code session ID
+            last_card_id: Optional card ID of the last processed card
+        """
+        session_data = self.state.setdefault("sessions", {}).setdefault(project, {})
+        session_data["session_id"] = session_id
+        session_data["last_activity"] = datetime.now(timezone.utc).isoformat()
+        if last_card_id:
+            session_data["last_card_id"] = last_card_id
         self._save()
+
+    def get_last_card_id(self, project: str) -> Optional[str]:
+        """Get the last processed card ID for a project."""
+        session = self.state.get("sessions", {}).get(project)
+        return session.get("last_card_id") if session else None
 
     def is_processed(self, card_id: str) -> bool:
         """Check if a card has been processed."""
