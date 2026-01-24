@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 import re
 import urllib.request
 import urllib.error
@@ -15,6 +16,9 @@ from .config import ClaudeConfig
 from .trello import TrelloCard
 
 logger = logging.getLogger(__name__)
+
+# Claude Code projects directory
+CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
 # Default credentials path for Claude Code OAuth
 DEFAULT_CREDENTIALS_PATH = "~/.claude/.credentials.json"
@@ -176,6 +180,84 @@ def fetch_claude_usage_limits(
         seven_day_opus=_parse_usage_limit(data.get("seven_day_opus")),
         seven_day_sonnet=_parse_usage_limit(data.get("seven_day_sonnet")),
     )
+
+
+def _get_session_jsonl_path(session_id: str, working_dir: Optional[str]) -> Optional[Path]:
+    """Get the path to the JSONL file for a session.
+
+    Claude Code stores session data in ~/.claude/projects/<project-dir>/<session-id>.jsonl
+    where <project-dir> is the working directory with slashes replaced by dashes.
+
+    Args:
+        session_id: The session ID (UUID format)
+        working_dir: The working directory for the project
+
+    Returns:
+        Path to the JSONL file if found, None otherwise
+    """
+    if not working_dir:
+        return None
+
+    # Convert working directory to Claude's project directory format
+    # e.g., /home/user/src/myproject -> -home-user-src-myproject
+    abs_path = Path(working_dir).expanduser().resolve()
+    project_dir_name = str(abs_path).replace("/", "-")
+
+    jsonl_path = CLAUDE_PROJECTS_DIR / project_dir_name / f"{session_id}.jsonl"
+    if jsonl_path.exists():
+        return jsonl_path
+
+    return None
+
+
+def _read_token_usage_from_jsonl(jsonl_path: Path) -> dict:
+    """Read and aggregate token usage from a session JSONL file.
+
+    Claude Code's /cost command doesn't properly report token usage in its
+    JSON output (returns 0 for all token fields). This function reads the
+    actual usage data from the session's JSONL file.
+
+    Args:
+        jsonl_path: Path to the session JSONL file
+
+    Returns:
+        Dictionary with aggregated token counts:
+        - input_tokens: Total input tokens
+        - output_tokens: Total output tokens
+        - cache_creation_input_tokens: Total cache creation tokens
+        - cache_read_input_tokens: Total cache read tokens
+    """
+    totals = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+    }
+
+    try:
+        with open(jsonl_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    usage = data.get("message", {}).get("usage", {})
+                    if usage:
+                        totals["input_tokens"] += usage.get("input_tokens", 0)
+                        totals["output_tokens"] += usage.get("output_tokens", 0)
+                        totals["cache_creation_input_tokens"] += usage.get(
+                            "cache_creation_input_tokens", 0
+                        )
+                        totals["cache_read_input_tokens"] += usage.get(
+                            "cache_read_input_tokens", 0
+                        )
+                except json.JSONDecodeError:
+                    continue
+    except (OSError, IOError) as e:
+        logger.debug("Could not read JSONL file %s: %s", jsonl_path, e)
+
+    return totals
 
 
 @dataclass
@@ -577,20 +659,20 @@ class ClaudeRunner:
                             wall_ms = data["duration_ms"]
                             cost_info.wall_duration = self._format_duration_ms(wall_ms)
                         # Note: code_changes is not available in /cost JSON output
-
-                        # Extract token usage from usage field
-                        usage = data.get("usage", {})
-                        cost_info.input_tokens = usage.get("input_tokens", 0)
-                        cost_info.output_tokens = usage.get("output_tokens", 0)
-                        cost_info.cache_creation_tokens = usage.get(
-                            "cache_creation_input_tokens", 0
-                        )
-                        cost_info.cache_read_tokens = usage.get(
-                            "cache_read_input_tokens", 0
-                        )
                         break  # Found our JSON line, no need to continue
                     except json.JSONDecodeError:
                         continue
+
+            # Read token usage from JSONL file instead of /cost output
+            # Claude Code's /cost command returns 0 for all token fields,
+            # but the actual usage data is in the session's JSONL file
+            jsonl_path = _get_session_jsonl_path(session_id, working_dir)
+            if jsonl_path:
+                usage = _read_token_usage_from_jsonl(jsonl_path)
+                cost_info.input_tokens = usage["input_tokens"]
+                cost_info.output_tokens = usage["output_tokens"]
+                cost_info.cache_creation_tokens = usage["cache_creation_input_tokens"]
+                cost_info.cache_read_tokens = usage["cache_read_input_tokens"]
 
             return cost_info
 

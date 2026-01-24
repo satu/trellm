@@ -23,6 +23,9 @@ from trellm.claude import (
     ClaudeUsageLimits,
     fetch_claude_usage_limits,
     _parse_usage_limit,
+    _get_session_jsonl_path,
+    _read_token_usage_from_jsonl,
+    CLAUDE_PROJECTS_DIR,
 )
 from trellm.config import ClaudeConfig
 from trellm.trello import TrelloCard
@@ -979,7 +982,7 @@ class TestClaudeRunnerCost:
 
     @pytest.mark.asyncio
     async def test_run_cost_with_token_usage(self, runner):
-        """Test /cost parsing of token usage data."""
+        """Test /cost with token usage read from JSONL file."""
         json_output = {
             "type": "result",
             "subtype": "success",
@@ -987,13 +990,8 @@ class TestClaudeRunnerCost:
             "duration_ms": 1000,
             "duration_api_ms": 5000,
             "total_cost_usd": 0.25,
-            "usage": {
-                "input_tokens": 1500,
-                "output_tokens": 500,
-                "cache_creation_input_tokens": 200,
-                "cache_read_input_tokens": 30000,
-                "server_tool_use": {"web_search_requests": 0},
-            },
+            # Note: /cost command returns 0 for all token fields,
+            # so we read from JSONL file instead
         }
 
         mock_proc = AsyncMock()
@@ -1005,12 +1003,23 @@ class TestClaudeRunnerCost:
             )
         )
 
+        # Mock the JSONL file reading to return token usage
+        mock_usage = {
+            "input_tokens": 1500,
+            "output_tokens": 500,
+            "cache_creation_input_tokens": 200,
+            "cache_read_input_tokens": 30000,
+        }
+
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
-            result = await runner._run_cost(
-                session_id="test-session",
-                working_dir="/tmp/test",
-                prefix="[test] ",
-            )
+            with patch("trellm.claude._get_session_jsonl_path") as mock_get_path:
+                with patch("trellm.claude._read_token_usage_from_jsonl", return_value=mock_usage):
+                    mock_get_path.return_value = "/tmp/mock.jsonl"
+                    result = await runner._run_cost(
+                        session_id="test-session",
+                        working_dir="/tmp/test",
+                        prefix="[test] ",
+                    )
 
         assert result is not None
         assert result.input_tokens == 1500
@@ -1020,13 +1029,12 @@ class TestClaudeRunnerCost:
 
     @pytest.mark.asyncio
     async def test_run_cost_without_token_usage(self, runner):
-        """Test /cost handles missing usage data gracefully."""
+        """Test /cost when JSONL file is not found returns zero tokens."""
         json_output = {
             "type": "result",
             "duration_ms": 1000,
             "duration_api_ms": 5000,
             "total_cost_usd": 0.25,
-            # No usage field
         }
 
         mock_proc = AsyncMock()
@@ -1039,11 +1047,12 @@ class TestClaudeRunnerCost:
         )
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
-            result = await runner._run_cost(
-                session_id="test-session",
-                working_dir="/tmp/test",
-                prefix="[test] ",
-            )
+            with patch("trellm.claude._get_session_jsonl_path", return_value=None):
+                result = await runner._run_cost(
+                    session_id="test-session",
+                    working_dir="/tmp/test",
+                    prefix="[test] ",
+                )
 
         assert result is not None
         assert result.input_tokens == 0
@@ -1267,6 +1276,167 @@ class TestClaudeRunnerPreCompaction:
         assert result.cost_info.total_cost == "$0.50"
 
 
+class TestGetSessionJsonlPath:
+    """Tests for _get_session_jsonl_path helper function."""
+
+    def test_returns_none_without_working_dir(self):
+        """Test that None is returned if working_dir is None."""
+        result = _get_session_jsonl_path("test-session", None)
+        assert result is None
+
+    def test_returns_none_if_file_not_exists(self, tmp_path):
+        """Test that None is returned if JSONL file doesn't exist."""
+        with patch("trellm.claude.CLAUDE_PROJECTS_DIR", tmp_path):
+            result = _get_session_jsonl_path("test-session", "/home/user/project")
+        assert result is None
+
+    def test_returns_path_if_file_exists(self, tmp_path):
+        """Test that correct path is returned if JSONL file exists."""
+        # Create the expected directory structure
+        project_dir = tmp_path / "-home-user-project"
+        project_dir.mkdir()
+        jsonl_file = project_dir / "test-session.jsonl"
+        jsonl_file.touch()
+
+        with patch("trellm.claude.CLAUDE_PROJECTS_DIR", tmp_path):
+            result = _get_session_jsonl_path("test-session", "/home/user/project")
+
+        assert result is not None
+        assert result == jsonl_file
+
+    def test_handles_tilde_expansion(self, tmp_path):
+        """Test that ~ in working_dir is expanded correctly."""
+        # Create the expected directory structure
+        # ~ expands to home dir, so ~/src/project -> /home/user/src/project
+        # The resulting path should be -home-user-src-project
+        from pathlib import Path
+        expanded_path = Path("~/src/project").expanduser().resolve()
+        project_dir_name = str(expanded_path).replace("/", "-")
+        project_dir = tmp_path / project_dir_name
+        project_dir.mkdir()
+        jsonl_file = project_dir / "test-session.jsonl"
+        jsonl_file.touch()
+
+        with patch("trellm.claude.CLAUDE_PROJECTS_DIR", tmp_path):
+            result = _get_session_jsonl_path("test-session", "~/src/project")
+
+        assert result is not None
+        assert result == jsonl_file
+
+
+class TestReadTokenUsageFromJsonl:
+    """Tests for _read_token_usage_from_jsonl helper function."""
+
+    def test_reads_and_aggregates_token_usage(self, tmp_path):
+        """Test that token usage is correctly aggregated from JSONL."""
+        jsonl_file = tmp_path / "test.jsonl"
+        # Write multiple lines with usage data
+        lines = [
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 50,
+                        "cache_creation_input_tokens": 200,
+                        "cache_read_input_tokens": 1000,
+                    }
+                }
+            }),
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "usage": {
+                        "input_tokens": 150,
+                        "output_tokens": 75,
+                        "cache_creation_input_tokens": 300,
+                        "cache_read_input_tokens": 2000,
+                    }
+                }
+            }),
+        ]
+        jsonl_file.write_text("\n".join(lines))
+
+        result = _read_token_usage_from_jsonl(jsonl_file)
+
+        assert result["input_tokens"] == 250  # 100 + 150
+        assert result["output_tokens"] == 125  # 50 + 75
+        assert result["cache_creation_input_tokens"] == 500  # 200 + 300
+        assert result["cache_read_input_tokens"] == 3000  # 1000 + 2000
+
+    def test_handles_empty_file(self, tmp_path):
+        """Test that empty file returns zero tokens."""
+        jsonl_file = tmp_path / "empty.jsonl"
+        jsonl_file.touch()
+
+        result = _read_token_usage_from_jsonl(jsonl_file)
+
+        assert result["input_tokens"] == 0
+        assert result["output_tokens"] == 0
+        assert result["cache_creation_input_tokens"] == 0
+        assert result["cache_read_input_tokens"] == 0
+
+    def test_handles_lines_without_usage(self, tmp_path):
+        """Test that lines without usage data are skipped."""
+        jsonl_file = tmp_path / "test.jsonl"
+        lines = [
+            json.dumps({"type": "user", "message": {"content": "Hello"}}),
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 50,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                    }
+                }
+            }),
+        ]
+        jsonl_file.write_text("\n".join(lines))
+
+        result = _read_token_usage_from_jsonl(jsonl_file)
+
+        assert result["input_tokens"] == 100
+        assert result["output_tokens"] == 50
+
+    def test_handles_malformed_json(self, tmp_path):
+        """Test that malformed JSON lines are skipped."""
+        jsonl_file = tmp_path / "test.jsonl"
+        lines = [
+            "not valid json",
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 50,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                    }
+                }
+            }),
+        ]
+        jsonl_file.write_text("\n".join(lines))
+
+        result = _read_token_usage_from_jsonl(jsonl_file)
+
+        assert result["input_tokens"] == 100
+        assert result["output_tokens"] == 50
+
+    def test_handles_file_read_error(self, tmp_path):
+        """Test that file read errors return zero tokens."""
+        # Non-existent file
+        jsonl_file = tmp_path / "nonexistent.jsonl"
+
+        result = _read_token_usage_from_jsonl(jsonl_file)
+
+        assert result["input_tokens"] == 0
+        assert result["output_tokens"] == 0
+        assert result["cache_creation_input_tokens"] == 0
+        assert result["cache_read_input_tokens"] == 0
+
+
 class TestUsageLimitInfo:
     """Tests for UsageLimitInfo dataclass."""
 
@@ -1277,20 +1447,21 @@ class TestUsageLimitInfo:
 
     def test_format_reset_time_shows_date_and_time(self):
         """Test formatting reset time shows actual date and time."""
-        # Use a fixed time for predictable output
-        reset_time = datetime(2026, 1, 24, 17, 59, 0, tzinfo=timezone.utc)
+        # Use a time far in the future for predictable output
+        reset_time = datetime(2030, 6, 15, 17, 59, 0, tzinfo=timezone.utc)
         info = UsageLimitInfo(utilization=50.0, resets_at=reset_time)
         result = info.format_reset_time()
-        # Should show "Jan 24, 2026 5:59 PM UTC"
-        assert "Jan 24, 2026" in result
+        # Should show "Jun 15, 2030 5:59 PM UTC"
+        assert "Jun 15, 2030" in result
         assert "5:59 PM UTC" in result
 
     def test_format_reset_time_morning_hours(self):
         """Test formatting reset time in morning hours."""
-        reset_time = datetime(2026, 3, 15, 9, 30, 0, tzinfo=timezone.utc)
+        # Use a time far in the future
+        reset_time = datetime(2030, 3, 15, 9, 30, 0, tzinfo=timezone.utc)
         info = UsageLimitInfo(utilization=50.0, resets_at=reset_time)
         result = info.format_reset_time()
-        assert "Mar 15, 2026" in result
+        assert "Mar 15, 2030" in result
         assert "9:30 AM UTC" in result
 
     def test_format_reset_time_past(self):
