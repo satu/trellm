@@ -74,6 +74,28 @@ trellm
 
 1. Polls Trello TODO list every 5 seconds
 2. For each card, extracts project name from the first word
-3. Invokes Claude Code with the task, resuming existing sessions
-4. Moves completed cards to READY TO TRY list
-5. Persists session IDs for conversation continuity
+3. **Pre-compacts** the session before processing a new ticket (preserves context while reducing tokens)
+4. Invokes Claude Code with the task, resuming existing sessions
+5. **Logs cost and usage stats** after each task completion
+6. Moves completed cards to READY TO TRY list
+7. Persists session IDs and last processed card ID for conversation continuity
+
+## Token Management
+
+TreLLM automatically manages token usage to prevent context exhaustion:
+
+### Pre-task Compaction
+- Runs `/compact` before processing each new ticket
+- **Skips compaction** if reprocessing the same card (e.g., moved back to TODO with feedback)
+- Preserves project knowledge while keeping context fresh
+- Prevents "Prompt too long" errors proactively
+
+### Cost Reporting
+After each task, TreLLM logs session usage:
+```
+[project] Session cost: $0.55 | API duration: 6m 19.7s | Wall duration: 30m | Changes: 150 lines added, 20 lines removed
+```
+
+### Error Handling
+- **Prompt too long**: Automatically runs `/compact` and retries
+- **Rate limit**: Parses reset time and sleeps until limit resets
