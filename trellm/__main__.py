@@ -8,7 +8,7 @@ from collections import defaultdict
 from dataclasses import asdict
 from typing import Optional
 
-from .claude import ClaudeRunner
+from .claude import ClaudeRunner, fetch_claude_usage_limits
 from .config import Config, load_config
 from .state import StateManager
 from .trello import TrelloClient, TrelloCard
@@ -94,11 +94,18 @@ async def handle_stats_command(
     project = parse_project(card.name)
 
     try:
-        # Generate stats report
+        # Fetch real-time usage limits from Claude API
+        usage_limits = fetch_claude_usage_limits()
+
+        # Generate stats report (includes historical stats)
         stats_report = state.format_stats_report(project if project != "unknown" else None)
 
+        # Combine real-time usage limits with historical stats
+        usage_report = usage_limits.format_report()
+        full_report = f"{usage_report}\n\n{stats_report}"
+
         # Add comment with stats
-        comment = f"Claude: /stats command processed\n\n{stats_report}"
+        comment = f"Claude: /stats command processed\n\n{full_report}"
         await trello.add_comment(card.id, comment)
 
         # Move card to ready

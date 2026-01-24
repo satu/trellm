@@ -4,7 +4,9 @@ import asyncio
 import json
 import logging
 import re
-from dataclasses import dataclass
+import urllib.request
+import urllib.error
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -13,6 +15,12 @@ from .config import ClaudeConfig
 from .trello import TrelloCard
 
 logger = logging.getLogger(__name__)
+
+# Default credentials path for Claude Code OAuth
+DEFAULT_CREDENTIALS_PATH = "~/.claude/.credentials.json"
+
+# Anthropic OAuth usage API endpoint
+USAGE_API_URL = "https://api.anthropic.com/api/oauth/usage"
 
 # Error patterns for Claude Code
 # Detailed pattern with token counts (e.g., "prompt is too long: 206453 tokens > 200000 maximum")
@@ -27,6 +35,151 @@ RATE_LIMIT_USER_PATTERN = re.compile(r"you've hit your limit", re.IGNORECASE)
 RATE_LIMIT_RESET_DURATION_PATTERN = re.compile(r"resets?\s+(?:in\s+)?(\d+)\s*(hours?|minutes?|h|m|days?|d)", re.IGNORECASE)
 # Reset time as clock time (e.g., "resets 8pm (UTC)", "resets 10am")
 RATE_LIMIT_RESET_TIME_PATTERN = re.compile(r"resets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*(?:\(?(UTC|GMT)?\)?)?", re.IGNORECASE)
+
+
+@dataclass
+class UsageLimitInfo:
+    """Usage limit information for a specific time window."""
+
+    utilization: float  # Percentage used (0-100)
+    resets_at: Optional[datetime] = None  # When the limit resets
+
+    def format_reset_time(self) -> str:
+        """Format reset time as human-readable string."""
+        if not self.resets_at:
+            return "N/A"
+        now = datetime.now(timezone.utc)
+        delta = self.resets_at - now
+        if delta.total_seconds() < 0:
+            return "now"
+        hours = int(delta.total_seconds() // 3600)
+        minutes = int((delta.total_seconds() % 3600) // 60)
+        if hours > 0:
+            return f"{hours}h {minutes}m"
+        return f"{minutes}m"
+
+
+@dataclass
+class ClaudeUsageLimits:
+    """Claude Code usage limits (from Anthropic OAuth API)."""
+
+    five_hour: Optional[UsageLimitInfo] = None
+    seven_day: Optional[UsageLimitInfo] = None
+    seven_day_opus: Optional[UsageLimitInfo] = None
+    seven_day_sonnet: Optional[UsageLimitInfo] = None
+    error: Optional[str] = None  # Error message if fetch failed
+
+    def format_report(self) -> str:
+        """Format usage limits as a human-readable report section."""
+        lines = ["### Claude Usage Limits (Real-Time)"]
+
+        if self.error:
+            lines.append(f"- **Error:** {self.error}")
+            return "\n".join(lines)
+
+        if self.five_hour:
+            lines.append(
+                f"- **5-Hour Session:** {self.five_hour.utilization:.0f}% used "
+                f"(resets in {self.five_hour.format_reset_time()})"
+            )
+
+        if self.seven_day:
+            lines.append(
+                f"- **7-Day Weekly:** {self.seven_day.utilization:.0f}% used "
+                f"(resets in {self.seven_day.format_reset_time()})"
+            )
+
+        if self.seven_day_opus and self.seven_day_opus.utilization > 0:
+            lines.append(
+                f"- **7-Day Opus:** {self.seven_day_opus.utilization:.0f}% used "
+                f"(resets in {self.seven_day_opus.format_reset_time()})"
+            )
+
+        if self.seven_day_sonnet and self.seven_day_sonnet.utilization > 0:
+            lines.append(
+                f"- **7-Day Sonnet:** {self.seven_day_sonnet.utilization:.0f}% used "
+                f"(resets in {self.seven_day_sonnet.format_reset_time()})"
+            )
+
+        return "\n".join(lines)
+
+
+def _parse_usage_limit(data: Optional[dict]) -> Optional[UsageLimitInfo]:
+    """Parse usage limit data from API response."""
+    if not data:
+        return None
+    utilization = data.get("utilization")
+    if utilization is None:
+        return None
+    resets_at = None
+    if data.get("resets_at"):
+        try:
+            # Parse ISO format datetime
+            resets_str = data["resets_at"]
+            # Handle timezone offset format
+            resets_at = datetime.fromisoformat(resets_str.replace("+00:00", "+00:00"))
+        except (ValueError, TypeError):
+            pass
+    return UsageLimitInfo(utilization=float(utilization), resets_at=resets_at)
+
+
+def fetch_claude_usage_limits(
+    credentials_path: Optional[str] = None,
+) -> ClaudeUsageLimits:
+    """Fetch current Claude usage limits from Anthropic OAuth API.
+
+    Args:
+        credentials_path: Path to Claude credentials file.
+            Defaults to ~/.claude/.credentials.json
+
+    Returns:
+        ClaudeUsageLimits with current usage data or error message.
+    """
+    cred_path = Path(credentials_path or DEFAULT_CREDENTIALS_PATH).expanduser()
+
+    # Read credentials
+    try:
+        with open(cred_path) as f:
+            creds = json.load(f)
+    except FileNotFoundError:
+        return ClaudeUsageLimits(error="Credentials file not found")
+    except json.JSONDecodeError:
+        return ClaudeUsageLimits(error="Invalid credentials file")
+
+    # Extract access token
+    token = creds.get("claudeAiOauth", {}).get("accessToken")
+    if not token:
+        return ClaudeUsageLimits(error="No OAuth access token found")
+
+    # Make API request
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "claude-code/2.0.76",
+        "Authorization": f"Bearer {token}",
+        "anthropic-beta": "oauth-2025-04-20",
+    }
+
+    req = urllib.request.Request(USAGE_API_URL, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            return ClaudeUsageLimits(error="OAuth token expired or invalid")
+        return ClaudeUsageLimits(error=f"API error: {e.code}")
+    except urllib.error.URLError as e:
+        return ClaudeUsageLimits(error=f"Network error: {e.reason}")
+    except Exception as e:
+        return ClaudeUsageLimits(error=f"Failed to fetch usage: {e}")
+
+    # Parse response
+    return ClaudeUsageLimits(
+        five_hour=_parse_usage_limit(data.get("five_hour")),
+        seven_day=_parse_usage_limit(data.get("seven_day")),
+        seven_day_opus=_parse_usage_limit(data.get("seven_day_opus")),
+        seven_day_sonnet=_parse_usage_limit(data.get("seven_day_sonnet")),
+    )
 
 
 @dataclass

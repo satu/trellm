@@ -19,6 +19,10 @@ from trellm.claude import (
     RATE_LIMIT_USER_PATTERN,
     RATE_LIMIT_RESET_DURATION_PATTERN,
     RATE_LIMIT_RESET_TIME_PATTERN,
+    UsageLimitInfo,
+    ClaudeUsageLimits,
+    fetch_claude_usage_limits,
+    _parse_usage_limit,
 )
 from trellm.config import ClaudeConfig
 from trellm.trello import TrelloCard
@@ -1149,3 +1153,187 @@ class TestClaudeRunnerPreCompaction:
 
         assert result.cost_info == cost_info
         assert result.cost_info.total_cost == "$0.50"
+
+
+class TestUsageLimitInfo:
+    """Tests for UsageLimitInfo dataclass."""
+
+    def test_format_reset_time_no_reset(self):
+        """Test formatting when no reset time is set."""
+        info = UsageLimitInfo(utilization=50.0, resets_at=None)
+        assert info.format_reset_time() == "N/A"
+
+    def test_format_reset_time_hours_and_minutes(self):
+        """Test formatting reset time with hours and minutes."""
+        from datetime import timedelta
+        reset_time = datetime.now(timezone.utc) + timedelta(hours=2, minutes=30)
+        info = UsageLimitInfo(utilization=50.0, resets_at=reset_time)
+        result = info.format_reset_time()
+        assert "2h" in result
+        assert "m" in result
+
+    def test_format_reset_time_minutes_only(self):
+        """Test formatting reset time with only minutes."""
+        from datetime import timedelta
+        reset_time = datetime.now(timezone.utc) + timedelta(minutes=45)
+        info = UsageLimitInfo(utilization=50.0, resets_at=reset_time)
+        result = info.format_reset_time()
+        assert "h" not in result
+        assert "m" in result
+
+    def test_format_reset_time_past(self):
+        """Test formatting when reset time is in the past."""
+        from datetime import timedelta
+        reset_time = datetime.now(timezone.utc) - timedelta(minutes=5)
+        info = UsageLimitInfo(utilization=50.0, resets_at=reset_time)
+        assert info.format_reset_time() == "now"
+
+
+class TestClaudeUsageLimits:
+    """Tests for ClaudeUsageLimits dataclass."""
+
+    def test_format_report_with_data(self):
+        """Test formatting report with usage data."""
+        from datetime import timedelta
+        reset_5h = datetime.now(timezone.utc) + timedelta(hours=3)
+        reset_7d = datetime.now(timezone.utc) + timedelta(days=2)
+
+        limits = ClaudeUsageLimits(
+            five_hour=UsageLimitInfo(utilization=25.0, resets_at=reset_5h),
+            seven_day=UsageLimitInfo(utilization=60.0, resets_at=reset_7d),
+        )
+        report = limits.format_report()
+
+        assert "Claude Usage Limits" in report
+        assert "5-Hour Session" in report
+        assert "25%" in report
+        assert "7-Day Weekly" in report
+        assert "60%" in report
+
+    def test_format_report_with_error(self):
+        """Test formatting report when there's an error."""
+        limits = ClaudeUsageLimits(error="Token expired")
+        report = limits.format_report()
+
+        assert "Claude Usage Limits" in report
+        assert "Error" in report
+        assert "Token expired" in report
+
+    def test_format_report_with_opus_usage(self):
+        """Test formatting report with Opus-specific usage."""
+        limits = ClaudeUsageLimits(
+            five_hour=UsageLimitInfo(utilization=10.0),
+            seven_day=UsageLimitInfo(utilization=30.0),
+            seven_day_opus=UsageLimitInfo(utilization=15.0),
+        )
+        report = limits.format_report()
+        assert "7-Day Opus" in report
+        assert "15%" in report
+
+    def test_format_report_hides_zero_opus(self):
+        """Test that zero Opus usage is hidden."""
+        limits = ClaudeUsageLimits(
+            five_hour=UsageLimitInfo(utilization=10.0),
+            seven_day=UsageLimitInfo(utilization=30.0),
+            seven_day_opus=UsageLimitInfo(utilization=0.0),
+        )
+        report = limits.format_report()
+        assert "7-Day Opus" not in report
+
+
+class TestParseUsageLimit:
+    """Tests for _parse_usage_limit helper function."""
+
+    def test_parse_valid_data(self):
+        """Test parsing valid usage limit data."""
+        data = {
+            "utilization": 45.5,
+            "resets_at": "2026-01-24T17:59:59.952570+00:00",
+        }
+        result = _parse_usage_limit(data)
+        assert result is not None
+        assert result.utilization == 45.5
+        assert result.resets_at is not None
+
+    def test_parse_none_data(self):
+        """Test parsing None data."""
+        result = _parse_usage_limit(None)
+        assert result is None
+
+    def test_parse_missing_utilization(self):
+        """Test parsing data without utilization."""
+        data = {"resets_at": "2026-01-24T17:59:59+00:00"}
+        result = _parse_usage_limit(data)
+        assert result is None
+
+    def test_parse_null_resets_at(self):
+        """Test parsing data with null resets_at."""
+        data = {"utilization": 0.0, "resets_at": None}
+        result = _parse_usage_limit(data)
+        assert result is not None
+        assert result.utilization == 0.0
+        assert result.resets_at is None
+
+
+class TestFetchClaudeUsageLimits:
+    """Tests for fetch_claude_usage_limits function."""
+
+    def test_fetch_missing_credentials_file(self, tmp_path):
+        """Test handling missing credentials file."""
+        result = fetch_claude_usage_limits(str(tmp_path / "nonexistent.json"))
+        assert result.error is not None
+        assert "not found" in result.error
+
+    def test_fetch_invalid_json(self, tmp_path):
+        """Test handling invalid JSON in credentials file."""
+        cred_file = tmp_path / "creds.json"
+        cred_file.write_text("not valid json")
+        result = fetch_claude_usage_limits(str(cred_file))
+        assert result.error is not None
+        assert "Invalid" in result.error
+
+    def test_fetch_missing_token(self, tmp_path):
+        """Test handling missing OAuth token."""
+        cred_file = tmp_path / "creds.json"
+        cred_file.write_text('{"claudeAiOauth": {}}')
+        result = fetch_claude_usage_limits(str(cred_file))
+        assert result.error is not None
+        assert "access token" in result.error
+
+    def test_fetch_success(self, tmp_path):
+        """Test successful fetch with mocked API."""
+        cred_file = tmp_path / "creds.json"
+        cred_file.write_text('{"claudeAiOauth": {"accessToken": "test-token"}}')
+
+        api_response = {
+            "five_hour": {"utilization": 25.0, "resets_at": "2026-01-24T18:00:00+00:00"},
+            "seven_day": {"utilization": 60.0, "resets_at": "2026-01-25T15:00:00+00:00"},
+        }
+
+        import io
+        mock_response = io.BytesIO(json.dumps(api_response).encode())
+
+        with patch("urllib.request.urlopen", return_value=mock_response):
+            result = fetch_claude_usage_limits(str(cred_file))
+
+        assert result.error is None
+        assert result.five_hour is not None
+        assert result.five_hour.utilization == 25.0
+        assert result.seven_day is not None
+        assert result.seven_day.utilization == 60.0
+
+    def test_fetch_api_error(self, tmp_path):
+        """Test handling API error."""
+        import urllib.error
+
+        cred_file = tmp_path / "creds.json"
+        cred_file.write_text('{"claudeAiOauth": {"accessToken": "test-token"}}')
+
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.side_effect = urllib.error.HTTPError(
+                "url", 401, "Unauthorized", {}, None
+            )
+            result = fetch_claude_usage_limits(str(cred_file))
+
+        assert result.error is not None
+        assert "expired" in result.error or "invalid" in result.error
