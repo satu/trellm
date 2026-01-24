@@ -325,8 +325,8 @@ async def process_cards(
             logger.info("Completed card %s", card.id)
             processed_count += 1
 
-            # Increment ticket count after successful completion
-            state.increment_ticket_count(project)
+            # Track this ticket for maintenance (unique tickets only)
+            state.add_processed_ticket(project, card.id)
 
         except Exception as e:
             logger.error("Failed to process card %s: %s", card.id, e)
@@ -440,8 +440,8 @@ async def process_card_for_project(
             await trello.move_to_ready(card.id)
             logger.info("[%s] Completed card %s", project, card.id)
 
-            # Increment ticket count after successful completion
-            state.increment_ticket_count(project)
+            # Track this ticket for maintenance (unique tickets only)
+            state.add_processed_ticket(project, card.id)
 
             return card.id
 

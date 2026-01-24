@@ -320,31 +320,59 @@ class StateManager:
         self._save()
 
     def get_ticket_count(self, project: str) -> int:
-        """Get the ticket count for a project."""
+        """Get the count of unique tickets processed for a project since last maintenance.
+
+        This returns the number of distinct card IDs tracked, not just a simple counter.
+        Processing the same ticket multiple times counts as one toward maintenance threshold.
+        """
         session = self.state.get("sessions", {}).get(project)
-        return session.get("ticket_count", 0) if session else 0
+        if not session:
+            return 0
+        # Support both old format (ticket_count) and new format (processed_ticket_ids)
+        ticket_ids = session.get("processed_ticket_ids", [])
+        if ticket_ids:
+            return len(ticket_ids)
+        # Fall back to old ticket_count for backwards compatibility
+        return session.get("ticket_count", 0)
 
-    def increment_ticket_count(self, project: str) -> int:
-        """Increment and return the ticket count for a project.
+    def add_processed_ticket(self, project: str, card_id: str) -> int:
+        """Add a ticket to the processed set for maintenance tracking.
 
-        This should be called after successfully processing a ticket.
+        This tracks unique ticket IDs since the last maintenance run.
+        Processing the same ticket multiple times only counts as one.
+
+        Args:
+            project: Project name
+            card_id: The Trello card ID that was processed
 
         Returns:
-            The new ticket count after incrementing.
+            The current count of unique tickets (after adding this one).
         """
         session_data = self.state.setdefault("sessions", {}).setdefault(project, {})
-        count = session_data.get("ticket_count", 0) + 1
-        session_data["ticket_count"] = count
+        ticket_ids = session_data.setdefault("processed_ticket_ids", [])
+
+        # Only add if not already present (maintain uniqueness)
+        if card_id not in ticket_ids:
+            ticket_ids.append(card_id)
+
+        # Clean up old ticket_count if present (migration from old format)
+        if "ticket_count" in session_data:
+            del session_data["ticket_count"]
+
         self._save()
-        return count
+        return len(ticket_ids)
 
     def reset_ticket_count(self, project: str) -> None:
-        """Reset the ticket count for a project to 0.
+        """Reset the processed tickets for a project.
 
         This should be called after maintenance completes to start a new cycle.
+        Clears the set of tracked unique ticket IDs.
         """
         session_data = self.state.setdefault("sessions", {}).setdefault(project, {})
-        session_data["ticket_count"] = 0
+        session_data["processed_ticket_ids"] = []
+        # Clean up old ticket_count if present
+        if "ticket_count" in session_data:
+            del session_data["ticket_count"]
         self._save()
 
     def get_last_maintenance(self, project: str) -> Optional[str]:

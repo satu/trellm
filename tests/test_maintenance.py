@@ -340,27 +340,55 @@ class TestStateManagerMaintenance:
 
         assert manager.get_ticket_count("project1") == 0
 
-    def test_increment_ticket_count(self, tmp_path):
-        """Test incrementing ticket count."""
+    def test_add_processed_ticket(self, tmp_path):
+        """Test adding processed tickets."""
         state_file = tmp_path / "state.json"
         manager = StateManager(str(state_file))
 
-        count = manager.increment_ticket_count("project1")
+        count = manager.add_processed_ticket("project1", "card-1")
         assert count == 1
         assert manager.get_ticket_count("project1") == 1
 
-        count = manager.increment_ticket_count("project1")
+        count = manager.add_processed_ticket("project1", "card-2")
         assert count == 2
         assert manager.get_ticket_count("project1") == 2
+
+    def test_add_processed_ticket_unique_only(self, tmp_path):
+        """Test that same ticket processed multiple times counts as one."""
+        state_file = tmp_path / "state.json"
+        manager = StateManager(str(state_file))
+
+        # Add same ticket multiple times
+        manager.add_processed_ticket("project1", "card-1")
+        manager.add_processed_ticket("project1", "card-1")
+        manager.add_processed_ticket("project1", "card-1")
+
+        # Should only count as 1
+        assert manager.get_ticket_count("project1") == 1
+
+    def test_add_processed_ticket_mixed_unique_and_duplicates(self, tmp_path):
+        """Test with mix of unique tickets and duplicates."""
+        state_file = tmp_path / "state.json"
+        manager = StateManager(str(state_file))
+
+        # Process 3 unique tickets, some multiple times
+        manager.add_processed_ticket("project1", "card-1")
+        manager.add_processed_ticket("project1", "card-2")
+        manager.add_processed_ticket("project1", "card-1")  # Duplicate
+        manager.add_processed_ticket("project1", "card-3")
+        manager.add_processed_ticket("project1", "card-2")  # Duplicate
+
+        # Should count 3 unique tickets
+        assert manager.get_ticket_count("project1") == 3
 
     def test_ticket_count_persistence(self, tmp_path):
         """Test that ticket count is persisted."""
         state_file = tmp_path / "state.json"
 
         manager1 = StateManager(str(state_file))
-        manager1.increment_ticket_count("project1")
-        manager1.increment_ticket_count("project1")
-        manager1.increment_ticket_count("project1")
+        manager1.add_processed_ticket("project1", "card-1")
+        manager1.add_processed_ticket("project1", "card-2")
+        manager1.add_processed_ticket("project1", "card-3")
 
         # Create new manager to test persistence
         manager2 = StateManager(str(state_file))
@@ -371,12 +399,64 @@ class TestStateManagerMaintenance:
         state_file = tmp_path / "state.json"
         manager = StateManager(str(state_file))
 
-        manager.increment_ticket_count("project1")
-        manager.increment_ticket_count("project1")
-        manager.increment_ticket_count("project2")
+        manager.add_processed_ticket("project1", "card-1")
+        manager.add_processed_ticket("project1", "card-2")
+        manager.add_processed_ticket("project2", "card-3")
 
         assert manager.get_ticket_count("project1") == 2
         assert manager.get_ticket_count("project2") == 1
+
+    def test_backwards_compatibility_with_old_ticket_count(self, tmp_path):
+        """Test that old ticket_count format is still read correctly."""
+        state_file = tmp_path / "state.json"
+
+        # Write state in old format
+        import json
+        old_state = {
+            "sessions": {
+                "project1": {
+                    "session_id": "s1",
+                    "ticket_count": 5,
+                }
+            },
+            "processed": {},
+            "stats": {"global": {}, "by_project": {}, "by_date": {}, "ticket_history": []},
+        }
+        state_file.write_text(json.dumps(old_state))
+
+        manager = StateManager(str(state_file))
+        # Should read old ticket_count when processed_ticket_ids is empty
+        assert manager.get_ticket_count("project1") == 5
+
+    def test_migration_from_old_format(self, tmp_path):
+        """Test that adding a ticket migrates from old format to new format."""
+        state_file = tmp_path / "state.json"
+
+        # Write state in old format
+        import json
+        old_state = {
+            "sessions": {
+                "project1": {
+                    "session_id": "s1",
+                    "ticket_count": 5,
+                }
+            },
+            "processed": {},
+            "stats": {"global": {}, "by_project": {}, "by_date": {}, "ticket_history": []},
+        }
+        state_file.write_text(json.dumps(old_state))
+
+        manager = StateManager(str(state_file))
+        # Add a new ticket - this triggers migration
+        manager.add_processed_ticket("project1", "card-new")
+
+        # Should now use new format (old ticket_count is lost, only new ticket counted)
+        assert manager.get_ticket_count("project1") == 1
+
+        # Verify old ticket_count is removed
+        new_state = json.loads(state_file.read_text())
+        assert "ticket_count" not in new_state["sessions"]["project1"]
+        assert "processed_ticket_ids" in new_state["sessions"]["project1"]
 
     def test_get_last_maintenance_initial(self, tmp_path):
         """Test getting last maintenance when not set."""
@@ -424,10 +504,10 @@ class TestStateManagerMaintenance:
         state_file = tmp_path / "state.json"
         manager = StateManager(str(state_file))
 
-        # Increment to simulate completed tickets
-        manager.increment_ticket_count("project1")
-        manager.increment_ticket_count("project1")
-        manager.increment_ticket_count("project1")
+        # Add tickets to simulate completed work
+        manager.add_processed_ticket("project1", "card-1")
+        manager.add_processed_ticket("project1", "card-2")
+        manager.add_processed_ticket("project1", "card-3")
         assert manager.get_ticket_count("project1") == 3
 
         # Reset after maintenance
@@ -439,10 +519,10 @@ class TestStateManagerMaintenance:
         state_file = tmp_path / "state.json"
         manager = StateManager(str(state_file))
 
-        manager.increment_ticket_count("project1")
-        manager.increment_ticket_count("project1")
-        manager.increment_ticket_count("project2")
-        manager.increment_ticket_count("project2")
+        manager.add_processed_ticket("project1", "card-1")
+        manager.add_processed_ticket("project1", "card-2")
+        manager.add_processed_ticket("project2", "card-3")
+        manager.add_processed_ticket("project2", "card-4")
 
         # Reset project1 only
         manager.reset_ticket_count("project1")
@@ -455,13 +535,32 @@ class TestStateManagerMaintenance:
         state_file = tmp_path / "state.json"
 
         manager1 = StateManager(str(state_file))
-        manager1.increment_ticket_count("project1")
-        manager1.increment_ticket_count("project1")
+        manager1.add_processed_ticket("project1", "card-1")
+        manager1.add_processed_ticket("project1", "card-2")
         manager1.reset_ticket_count("project1")
 
         # Create new manager to test persistence
         manager2 = StateManager(str(state_file))
         assert manager2.get_ticket_count("project1") == 0
+
+    def test_reset_clears_ticket_ids_for_new_cycle(self, tmp_path):
+        """Test that reset clears IDs so same tickets can be counted in next cycle."""
+        state_file = tmp_path / "state.json"
+        manager = StateManager(str(state_file))
+
+        # First maintenance cycle
+        manager.add_processed_ticket("project1", "card-1")
+        manager.add_processed_ticket("project1", "card-2")
+        assert manager.get_ticket_count("project1") == 2
+
+        # Maintenance runs, reset
+        manager.reset_ticket_count("project1")
+        assert manager.get_ticket_count("project1") == 0
+
+        # Second cycle - same tickets should count again
+        manager.add_processed_ticket("project1", "card-1")
+        manager.add_processed_ticket("project1", "card-2")
+        assert manager.get_ticket_count("project1") == 2
 
 
 class TestConfigMaintenance:
