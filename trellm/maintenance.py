@@ -303,21 +303,32 @@ def should_run_maintenance(
     ticket_count: int,
     maintenance_config: Optional[MaintenanceConfig],
 ) -> bool:
-    """Check if maintenance should run based on ticket count.
+    """Check if maintenance should run based on completed ticket count.
 
     Maintenance runs when:
     1. Maintenance is enabled in config
-    2. ticket_count is a multiple of the configured interval
+    2. We have completed at least N tickets since last maintenance
+
+    This should be called BEFORE processing a new ticket. When a new ticket
+    arrives and we've completed N tickets, maintenance runs first, then the
+    counter is reset to 0, and the new ticket is processed normally.
+
+    Example with interval=10:
+    - Tickets 1-10 are processed, counter reaches 10
+    - Ticket 11 arrives
+    - should_run_maintenance(10, config) returns True
+    - Maintenance runs, counter resets to 0
+    - Ticket 11 is processed, counter becomes 1
 
     Args:
-        ticket_count: Current ticket count (after incrementing)
+        ticket_count: Number of completed tickets since last maintenance
         maintenance_config: Maintenance configuration (or None if not configured)
 
     Returns:
-        True if maintenance should run
+        True if maintenance should run before the next ticket
     """
     if not maintenance_config or not maintenance_config.enabled:
         return False
 
-    # Run maintenance every N tickets (when count is divisible by interval)
-    return ticket_count > 0 and (ticket_count % maintenance_config.interval == 0)
+    # Run maintenance when we've completed at least interval tickets
+    return ticket_count >= maintenance_config.interval

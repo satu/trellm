@@ -338,6 +338,15 @@ class StateManager:
         self._save()
         return count
 
+    def reset_ticket_count(self, project: str) -> None:
+        """Reset the ticket count for a project to 0.
+
+        This should be called after maintenance completes to start a new cycle.
+        """
+        session_data = self.state.setdefault("sessions", {}).setdefault(project, {})
+        session_data["ticket_count"] = 0
+        self._save()
+
     def get_last_maintenance(self, project: str) -> Optional[str]:
         """Get the last maintenance timestamp for a project."""
         session = self.state.get("sessions", {}).get(project)

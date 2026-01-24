@@ -20,7 +20,15 @@ from trellm.trello import TrelloCard, TrelloClient
 
 
 class TestShouldRunMaintenance:
-    """Tests for should_run_maintenance function."""
+    """Tests for should_run_maintenance function.
+
+    Maintenance runs when we've completed at least N tickets since last maintenance.
+    This is checked BEFORE processing a new ticket:
+    - Tickets 1-10 complete, counter=10
+    - Ticket 11 arrives, should_run_maintenance(10) returns True
+    - Maintenance runs, counter resets to 0
+    - Ticket 11 processes, counter becomes 1
+    """
 
     def test_maintenance_disabled(self):
         """Test that maintenance doesn't run when disabled."""
@@ -34,24 +42,25 @@ class TestShouldRunMaintenance:
         assert not should_run_maintenance(10, None)
         assert not should_run_maintenance(100, None)
 
-    def test_maintenance_runs_on_interval(self):
-        """Test that maintenance runs on interval boundaries."""
+    def test_maintenance_runs_when_threshold_reached(self):
+        """Test that maintenance runs when we've completed at least N tickets."""
         config = MaintenanceConfig(enabled=True, interval=10)
 
-        # Should run at multiples of 10
+        # Should run when we've completed 10 or more tickets
         assert should_run_maintenance(10, config)
+        assert should_run_maintenance(11, config)  # Over threshold also triggers
         assert should_run_maintenance(20, config)
         assert should_run_maintenance(100, config)
 
-    def test_maintenance_skips_non_interval(self):
-        """Test that maintenance doesn't run on non-interval counts."""
+    def test_maintenance_skips_below_threshold(self):
+        """Test that maintenance doesn't run below the threshold."""
         config = MaintenanceConfig(enabled=True, interval=10)
 
-        # Should not run at non-multiples of 10
+        # Should not run when we haven't completed enough tickets
+        assert not should_run_maintenance(0, config)
         assert not should_run_maintenance(1, config)
         assert not should_run_maintenance(5, config)
-        assert not should_run_maintenance(11, config)
-        assert not should_run_maintenance(99, config)
+        assert not should_run_maintenance(9, config)
 
     def test_maintenance_skips_zero(self):
         """Test that maintenance doesn't run at ticket count 0."""
@@ -62,11 +71,13 @@ class TestShouldRunMaintenance:
         """Test maintenance with custom interval."""
         config = MaintenanceConfig(enabled=True, interval=5)
 
+        # Should run at 5 or above
         assert should_run_maintenance(5, config)
+        assert should_run_maintenance(6, config)
         assert should_run_maintenance(10, config)
-        assert should_run_maintenance(15, config)
+        # Should not run below 5
         assert not should_run_maintenance(3, config)
-        assert not should_run_maintenance(7, config)
+        assert not should_run_maintenance(4, config)
 
 
 class TestBuildMaintenancePrompt:
@@ -407,6 +418,50 @@ class TestStateManagerMaintenance:
 
         assert manager.get_last_maintenance("project1") is not None
         assert manager.get_last_maintenance("project2") is None
+
+    def test_reset_ticket_count(self, tmp_path):
+        """Test resetting ticket count after maintenance."""
+        state_file = tmp_path / "state.json"
+        manager = StateManager(str(state_file))
+
+        # Increment to simulate completed tickets
+        manager.increment_ticket_count("project1")
+        manager.increment_ticket_count("project1")
+        manager.increment_ticket_count("project1")
+        assert manager.get_ticket_count("project1") == 3
+
+        # Reset after maintenance
+        manager.reset_ticket_count("project1")
+        assert manager.get_ticket_count("project1") == 0
+
+    def test_reset_ticket_count_per_project(self, tmp_path):
+        """Test that reset only affects the specified project."""
+        state_file = tmp_path / "state.json"
+        manager = StateManager(str(state_file))
+
+        manager.increment_ticket_count("project1")
+        manager.increment_ticket_count("project1")
+        manager.increment_ticket_count("project2")
+        manager.increment_ticket_count("project2")
+
+        # Reset project1 only
+        manager.reset_ticket_count("project1")
+
+        assert manager.get_ticket_count("project1") == 0
+        assert manager.get_ticket_count("project2") == 2
+
+    def test_reset_ticket_count_persistence(self, tmp_path):
+        """Test that reset is persisted."""
+        state_file = tmp_path / "state.json"
+
+        manager1 = StateManager(str(state_file))
+        manager1.increment_ticket_count("project1")
+        manager1.increment_ticket_count("project1")
+        manager1.reset_ticket_count("project1")
+
+        # Create new manager to test persistence
+        manager2 = StateManager(str(state_file))
+        assert manager2.get_ticket_count("project1") == 0
 
 
 class TestConfigMaintenance:
