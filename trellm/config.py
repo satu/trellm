@@ -50,6 +50,8 @@ class ClaudeConfig:
     timeout: int = 1200  # 20 minutes default
     yolo: bool = False  # Run with --dangerously-skip-permissions
     projects: dict[str, ProjectConfig] = field(default_factory=dict)
+    # Global maintenance settings (applies to all projects unless overridden)
+    maintenance: Optional[MaintenanceConfig] = None
 
 
 @dataclass
@@ -77,9 +79,19 @@ class Config:
         return proj.compact_prompt if proj else None
 
     def get_maintenance_config(self, project: str) -> Optional[MaintenanceConfig]:
-        """Get maintenance configuration for a project."""
+        """Get maintenance configuration for a project.
+
+        Priority:
+        1. Per-project maintenance config (if exists)
+        2. Global maintenance config (if exists)
+        3. None (maintenance disabled)
+        """
         proj = self.claude.projects.get(project)
-        return proj.maintenance if proj else None
+        # Use per-project config if explicitly set
+        if proj and proj.maintenance is not None:
+            return proj.maintenance
+        # Fall back to global config
+        return self.claude.maintenance
 
 
 def load_config(config_path: Optional[str] = None) -> Config:
@@ -141,12 +153,22 @@ def load_config(config_path: Optional[str] = None) -> Config:
             maintenance=maintenance,
         )
 
+    # Parse global maintenance config if present
+    global_maint_data = claude_data.get("maintenance", {})
+    global_maintenance = None
+    if global_maint_data:
+        global_maintenance = MaintenanceConfig(
+            enabled=global_maint_data.get("enabled", False),
+            interval=global_maint_data.get("interval", 10),
+        )
+
     # Build Claude config
     claude = ClaudeConfig(
         binary=claude_data.get("binary", "claude"),
         timeout=claude_data.get("timeout", 1200),
         yolo=claude_data.get("yolo", False),
         projects=projects,
+        maintenance=global_maintenance,
     )
 
     return Config(

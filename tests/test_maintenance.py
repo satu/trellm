@@ -557,6 +557,169 @@ class TestConfigMaintenance:
         # Unknown project
         assert config.get_maintenance_config("unknown") is None
 
+    def test_global_maintenance_config(self, tmp_path):
+        """Test loading global maintenance config from YAML."""
+        import yaml
+        from trellm.config import load_config
+
+        config_data = {
+            "trello": {
+                "api_key": "key",
+                "api_token": "token",
+                "board_id": "board",
+                "todo_list_id": "list",
+            },
+            "claude": {
+                "maintenance": {
+                    "enabled": True,
+                    "interval": 15,
+                },
+                "projects": {
+                    "myproject": {
+                        "working_dir": "~/src/myproject",
+                    }
+                },
+            },
+        }
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml.dump(config_data))
+
+        config = load_config(str(config_file))
+
+        # Global maintenance should be set
+        assert config.claude.maintenance is not None
+        assert config.claude.maintenance.enabled is True
+        assert config.claude.maintenance.interval == 15
+
+    def test_global_maintenance_applies_to_projects(self, tmp_path):
+        """Test that global maintenance applies to projects without per-project config."""
+        import yaml
+        from trellm.config import load_config
+
+        config_data = {
+            "trello": {
+                "api_key": "key",
+                "api_token": "token",
+                "board_id": "board",
+                "todo_list_id": "list",
+            },
+            "claude": {
+                "maintenance": {
+                    "enabled": True,
+                    "interval": 10,
+                },
+                "projects": {
+                    "project_no_config": {
+                        "working_dir": "~/src/project1",
+                        # No per-project maintenance config
+                    }
+                },
+            },
+        }
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml.dump(config_data))
+
+        config = load_config(str(config_file))
+
+        # Should use global config
+        maint_config = config.get_maintenance_config("project_no_config")
+        assert maint_config is not None
+        assert maint_config.enabled is True
+        assert maint_config.interval == 10
+
+    def test_per_project_overrides_global(self, tmp_path):
+        """Test that per-project maintenance config overrides global config."""
+        import yaml
+        from trellm.config import load_config
+
+        config_data = {
+            "trello": {
+                "api_key": "key",
+                "api_token": "token",
+                "board_id": "board",
+                "todo_list_id": "list",
+            },
+            "claude": {
+                "maintenance": {
+                    "enabled": True,
+                    "interval": 10,
+                },
+                "projects": {
+                    "global_project": {
+                        "working_dir": "~/src/global",
+                        # Uses global maintenance
+                    },
+                    "custom_project": {
+                        "working_dir": "~/src/custom",
+                        "maintenance": {
+                            "enabled": True,
+                            "interval": 25,  # Custom interval
+                        },
+                    },
+                    "disabled_project": {
+                        "working_dir": "~/src/disabled",
+                        "maintenance": {
+                            "enabled": False,  # Explicitly disabled
+                        },
+                    },
+                },
+            },
+        }
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml.dump(config_data))
+
+        config = load_config(str(config_file))
+
+        # Project using global config
+        global_maint = config.get_maintenance_config("global_project")
+        assert global_maint is not None
+        assert global_maint.enabled is True
+        assert global_maint.interval == 10
+
+        # Project with custom interval
+        custom_maint = config.get_maintenance_config("custom_project")
+        assert custom_maint is not None
+        assert custom_maint.enabled is True
+        assert custom_maint.interval == 25
+
+        # Project explicitly disabled
+        disabled_maint = config.get_maintenance_config("disabled_project")
+        assert disabled_maint is not None
+        assert disabled_maint.enabled is False
+
+    def test_no_global_no_project_maintenance(self, tmp_path):
+        """Test that without global or per-project config, get_maintenance_config returns None."""
+        import yaml
+        from trellm.config import load_config
+
+        config_data = {
+            "trello": {
+                "api_key": "key",
+                "api_token": "token",
+                "board_id": "board",
+                "todo_list_id": "list",
+            },
+            "claude": {
+                "projects": {
+                    "myproject": {
+                        "working_dir": "~/src/myproject",
+                    }
+                },
+            },
+        }
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml.dump(config_data))
+
+        config = load_config(str(config_file))
+
+        # No global, no per-project config
+        assert config.claude.maintenance is None
+        assert config.get_maintenance_config("myproject") is None
+
 
 class TestMaintenanceTrelloCard:
     """Tests for Trello card creation/update in maintenance."""
