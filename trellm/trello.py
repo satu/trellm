@@ -36,6 +36,8 @@ class TrelloClient:
         # Optional: destination board/list for completed cards
         self.done_board_id = config.done_board_id
         self.done_list_id = config.done_list_id
+        # Optional: ICE BOX list for maintenance suggestions
+        self.icebox_list_id = config.icebox_list_id
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -137,3 +139,74 @@ class TrelloClient:
             params={"text": text},
         )
         logger.debug("Added comment to card %s", card_id)
+
+    async def find_card_by_name(self, list_id: str, name: str) -> Optional[TrelloCard]:
+        """Find a card by name in a specific list.
+
+        Args:
+            list_id: The list to search in
+            name: The card name to search for (case-insensitive)
+
+        Returns:
+            The card if found, None otherwise
+        """
+        data = await self._request("GET", f"/lists/{list_id}/cards")
+        name_lower = name.lower()
+        for c in data:
+            if c["name"].lower() == name_lower:
+                return TrelloCard(
+                    id=c["id"],
+                    name=c["name"],
+                    description=c.get("desc", ""),
+                    url=c["url"],
+                    last_activity=c.get("dateLastActivity", ""),
+                )
+        return None
+
+    async def create_card(
+        self,
+        list_id: str,
+        name: str,
+        description: str = "",
+    ) -> TrelloCard:
+        """Create a new card in a list.
+
+        Args:
+            list_id: The list to create the card in
+            name: The card name
+            description: The card description
+
+        Returns:
+            The created card
+        """
+        data = await self._request(
+            "POST",
+            "/cards",
+            params={
+                "idList": list_id,
+                "name": name,
+                "desc": description,
+            },
+        )
+        logger.info("Created card '%s' in list %s", name, list_id)
+        return TrelloCard(
+            id=data["id"],
+            name=data["name"],
+            description=data.get("desc", ""),
+            url=data["url"],
+            last_activity=data.get("dateLastActivity", ""),
+        )
+
+    async def update_card_description(self, card_id: str, description: str) -> None:
+        """Update a card's description.
+
+        Args:
+            card_id: The card to update
+            description: The new description
+        """
+        await self._request(
+            "PUT",
+            f"/cards/{card_id}",
+            json_data={"desc": description},
+        )
+        logger.debug("Updated description for card %s", card_id)

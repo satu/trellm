@@ -304,6 +304,8 @@ async def process_cards(
                         maintenance_config=maintenance_config,
                         ticket_count=ticket_count,
                         last_maintenance=state.get_last_maintenance(project),
+                        trello_client=trello,
+                        icebox_list_id=config.trello.icebox_list_id,
                     )
                     if maint_result.success:
                         state.set_last_maintenance(project)
@@ -416,6 +418,8 @@ async def process_card_for_project(
                         maintenance_config=maintenance_config,
                         ticket_count=ticket_count,
                         last_maintenance=state.get_last_maintenance(project),
+                        trello_client=trello,
+                        icebox_list_id=config.trello.icebox_list_id,
                     )
                     if maint_result.success:
                         state.set_last_maintenance(project)

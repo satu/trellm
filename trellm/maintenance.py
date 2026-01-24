@@ -8,7 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .config import ClaudeConfig, MaintenanceConfig
+from .config import ClaudeConfig, MaintenanceConfig, TrelloConfig
+from .trello import TrelloClient
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ def build_maintenance_prompt(
         The maintenance prompt string
     """
     last_maint_str = last_maintenance or "never"
+    current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     return f"""You are performing maintenance on the {project} project.
 
@@ -47,18 +49,17 @@ Recent ticket count: {ticket_count}
 Last maintenance: {last_maint_str}
 Maintenance interval: every {interval} tickets
 
-Please perform the following maintenance tasks:
+Please perform the following maintenance tasks and output your findings as a summary. DO NOT create any files.
 
 ## 1. CLAUDE.md Review
 - Check if CLAUDE.md exists in the project directory
 - If it exists, review its contents
 - Analyze recent work patterns from git history (last {interval} commits)
-- Suggest updates for:
+- Note any updates needed for:
   - New coding conventions discovered
   - Architecture decisions made
   - Test patterns established
   - Common gotchas/pitfalls found
-- Output any recommendations but DO NOT auto-apply changes to CLAUDE.md
 
 ## 2. Compaction Prompt Optimization
 - Review the current compact_prompt (if any) in use
@@ -66,7 +67,6 @@ Please perform the following maintenance tasks:
   - Context that frequently needs to be preserved
   - Patterns that keep getting re-read
 - Suggest updates to the compact_prompt configuration
-- Output suggestions for user review (DO NOT modify any config files)
 
 ## 3. Documentation Freshness Check
 - Scan for outdated README sections
@@ -74,11 +74,11 @@ Please perform the following maintenance tasks:
 - Flag stale TODOs in code (over 30 days old based on git blame)
 - Report any documentation gaps
 
-## 4. Write Maintenance Log
-Create or update the file `.claude/maintenance-log.md` in the project directory with a summary:
+## Output Format
+Your final output MUST be a summary in this exact format (this will be saved to a Trello card):
 
-```markdown
-## Maintenance Run - {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}
+---
+## {project} Maintenance - {current_date}
 
 ### Ticket Count: {ticket_count}
 
@@ -88,11 +88,19 @@ Create or update the file `.claude/maintenance-log.md` in the project directory 
 - [List decisions made]
 
 ### Recommendations
-- [List specific, actionable suggestions]
-- [Include suggested compact_prompt updates if any]
-```
 
-Be concise. Focus on actionable improvements. Do not make any changes other than updating the maintenance log."""
+#### CLAUDE.md Updates
+- [Specific suggestions for CLAUDE.md changes]
+
+#### Compact Prompt Updates
+- [Suggested compact_prompt configuration changes]
+
+#### Documentation
+- [Documentation issues found]
+- [Stale TODOs found]
+---
+
+Be concise. Focus on actionable improvements. DO NOT create or modify any files."""
 
 
 async def run_maintenance(
@@ -103,6 +111,8 @@ async def run_maintenance(
     maintenance_config: MaintenanceConfig,
     ticket_count: int,
     last_maintenance: Optional[str],
+    trello_client: Optional[TrelloClient] = None,
+    icebox_list_id: Optional[str] = None,
 ) -> MaintenanceResult:
     """Run the maintenance skill for a project.
 
@@ -114,6 +124,8 @@ async def run_maintenance(
         maintenance_config: Maintenance configuration for this project
         ticket_count: Current ticket count
         last_maintenance: ISO timestamp of last maintenance run
+        trello_client: Optional Trello client for creating maintenance cards
+        icebox_list_id: Optional ICE BOX list ID for maintenance cards
 
     Returns:
         MaintenanceResult with success status and summary
@@ -179,7 +191,7 @@ async def run_maintenance(
                 summary=f"Maintenance failed: {stderr_text[:200]}",
             )
 
-        # Parse output to get session ID
+        # Parse output to get session ID and result
         output = stdout.decode()
         new_session_id = None
         summary = "Maintenance completed"
@@ -197,6 +209,16 @@ async def run_maintenance(
                         break
                 except json.JSONDecodeError:
                     continue
+
+        # Create/update Trello card in ICE BOX if configured
+        if trello_client and icebox_list_id:
+            await _update_maintenance_card(
+                trello_client=trello_client,
+                icebox_list_id=icebox_list_id,
+                project=project,
+                summary=summary,
+                prefix=prefix,
+            )
 
         logger.info("%sMaintenance completed: %s", prefix, summary[:100])
 
@@ -217,6 +239,63 @@ async def run_maintenance(
         return MaintenanceResult(
             success=False,
             summary=f"Maintenance failed: {e}",
+        )
+
+
+async def _update_maintenance_card(
+    trello_client: TrelloClient,
+    icebox_list_id: str,
+    project: str,
+    summary: str,
+    prefix: str,
+) -> None:
+    """Create or update a maintenance card in the ICE BOX.
+
+    Args:
+        trello_client: Trello client for API calls
+        icebox_list_id: The ICE BOX list ID
+        project: Project name
+        summary: Maintenance summary to use as card description
+        prefix: Log prefix
+    """
+    card_name = f"{project} regular maintenance"
+
+    try:
+        # Search for existing card
+        existing_card = await trello_client.find_card_by_name(
+            list_id=icebox_list_id,
+            name=card_name,
+        )
+
+        if existing_card:
+            # Update existing card's description
+            await trello_client.update_card_description(
+                card_id=existing_card.id,
+                description=summary,
+            )
+            logger.info(
+                "%sUpdated maintenance card: %s",
+                prefix,
+                existing_card.url,
+            )
+        else:
+            # Create new card
+            new_card = await trello_client.create_card(
+                list_id=icebox_list_id,
+                name=card_name,
+                description=summary,
+            )
+            logger.info(
+                "%sCreated maintenance card: %s",
+                prefix,
+                new_card.url,
+            )
+
+    except Exception as e:
+        logger.warning(
+            "%sFailed to update maintenance card: %s",
+            prefix,
+            e,
         )
 
 

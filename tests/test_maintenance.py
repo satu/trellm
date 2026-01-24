@@ -7,14 +7,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from trellm.config import ClaudeConfig, MaintenanceConfig, ProjectConfig
+from trellm.config import ClaudeConfig, MaintenanceConfig, ProjectConfig, TrelloConfig
 from trellm.maintenance import (
     MaintenanceResult,
+    _update_maintenance_card,
     build_maintenance_prompt,
     run_maintenance,
     should_run_maintenance,
 )
 from trellm.state import StateManager
+from trellm.trello import TrelloCard, TrelloClient
 
 
 class TestShouldRunMaintenance:
@@ -134,8 +136,23 @@ class TestBuildMaintenancePrompt:
         assert "CLAUDE.md" in prompt
         assert "Compaction Prompt" in prompt
         assert "Documentation Freshness" in prompt
-        assert "Maintenance Log" in prompt
-        assert ".claude/maintenance-log.md" in prompt
+        # Should output to Trello, not file
+        assert "DO NOT create any files" in prompt
+        assert "Trello card" in prompt
+
+    def test_prompt_does_not_write_files(self):
+        """Test that prompt explicitly tells Claude not to create files."""
+        prompt = build_maintenance_prompt(
+            project="proj",
+            ticket_count=10,
+            last_maintenance=None,
+            interval=10,
+        )
+
+        # Should NOT mention creating local files
+        assert ".claude/maintenance-log.md" not in prompt
+        # Should emphasize no file creation
+        assert "DO NOT create" in prompt or "DO NOT modify" in prompt
 
 
 class TestMaintenanceResult:
@@ -539,3 +556,306 @@ class TestConfigMaintenance:
 
         # Unknown project
         assert config.get_maintenance_config("unknown") is None
+
+
+class TestMaintenanceTrelloCard:
+    """Tests for Trello card creation/update in maintenance."""
+
+    @pytest.mark.asyncio
+    async def test_update_maintenance_card_creates_new(self):
+        """Test that a new card is created when none exists."""
+        mock_client = AsyncMock(spec=TrelloClient)
+        mock_client.find_card_by_name = AsyncMock(return_value=None)
+        mock_client.create_card = AsyncMock(
+            return_value=TrelloCard(
+                id="new-card-id",
+                name="testproject regular maintenance",
+                description="summary",
+                url="https://trello.com/c/abc123",
+                last_activity="2026-01-24T00:00:00Z",
+            )
+        )
+
+        await _update_maintenance_card(
+            trello_client=mock_client,
+            icebox_list_id="icebox-list-123",
+            project="testproject",
+            summary="Test maintenance summary",
+            prefix="[test] ",
+        )
+
+        mock_client.find_card_by_name.assert_called_once_with(
+            list_id="icebox-list-123",
+            name="testproject regular maintenance",
+        )
+        mock_client.create_card.assert_called_once_with(
+            list_id="icebox-list-123",
+            name="testproject regular maintenance",
+            description="Test maintenance summary",
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_maintenance_card_updates_existing(self):
+        """Test that existing card is updated when found."""
+        existing_card = TrelloCard(
+            id="existing-card-id",
+            name="testproject regular maintenance",
+            description="old summary",
+            url="https://trello.com/c/xyz789",
+            last_activity="2026-01-20T00:00:00Z",
+        )
+        mock_client = AsyncMock(spec=TrelloClient)
+        mock_client.find_card_by_name = AsyncMock(return_value=existing_card)
+        mock_client.update_card_description = AsyncMock()
+
+        await _update_maintenance_card(
+            trello_client=mock_client,
+            icebox_list_id="icebox-list-123",
+            project="testproject",
+            summary="New maintenance summary",
+            prefix="[test] ",
+        )
+
+        mock_client.find_card_by_name.assert_called_once()
+        mock_client.update_card_description.assert_called_once_with(
+            card_id="existing-card-id",
+            description="New maintenance summary",
+        )
+        # Should not create new card
+        mock_client.create_card.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_maintenance_card_handles_error(self):
+        """Test that errors in card update are handled gracefully."""
+        mock_client = AsyncMock(spec=TrelloClient)
+        mock_client.find_card_by_name = AsyncMock(
+            side_effect=Exception("API error")
+        )
+
+        # Should not raise
+        await _update_maintenance_card(
+            trello_client=mock_client,
+            icebox_list_id="icebox-list-123",
+            project="testproject",
+            summary="Test summary",
+            prefix="[test] ",
+        )
+
+    @pytest.mark.asyncio
+    async def test_run_maintenance_with_trello_client(self, tmp_path):
+        """Test that run_maintenance creates Trello card when configured."""
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate = AsyncMock(
+            return_value=(
+                b'{"type":"result","result":"Maintenance findings","session_id":"s1"}\n',
+                b"",
+            )
+        )
+
+        mock_trello = AsyncMock(spec=TrelloClient)
+        mock_trello.find_card_by_name = AsyncMock(return_value=None)
+        mock_trello.create_card = AsyncMock(
+            return_value=TrelloCard(
+                id="card-123",
+                name="testproject regular maintenance",
+                description="Maintenance findings",
+                url="https://trello.com/c/abc",
+                last_activity="2026-01-24T00:00:00Z",
+            )
+        )
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            result = await run_maintenance(
+                project="testproject",
+                working_dir=str(tmp_path),
+                session_id=None,
+                claude_config=ClaudeConfig(binary="claude", timeout=60),
+                maintenance_config=MaintenanceConfig(enabled=True, interval=10),
+                ticket_count=10,
+                last_maintenance=None,
+                trello_client=mock_trello,
+                icebox_list_id="icebox-list-456",
+            )
+
+        assert result.success is True
+        # Should have called Trello to create card
+        mock_trello.find_card_by_name.assert_called_once()
+        mock_trello.create_card.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_run_maintenance_without_trello_client(self, tmp_path):
+        """Test that run_maintenance works without Trello client."""
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate = AsyncMock(
+            return_value=(
+                b'{"type":"result","result":"Done","session_id":"s1"}\n',
+                b"",
+            )
+        )
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            result = await run_maintenance(
+                project="testproject",
+                working_dir=str(tmp_path),
+                session_id=None,
+                claude_config=ClaudeConfig(binary="claude", timeout=60),
+                maintenance_config=MaintenanceConfig(enabled=True, interval=10),
+                ticket_count=10,
+                last_maintenance=None,
+                # No trello_client or icebox_list_id
+            )
+
+        assert result.success is True
+
+
+class TestTrelloConfigIceBox:
+    """Tests for icebox_list_id in TrelloConfig."""
+
+    def test_load_icebox_list_id(self, tmp_path):
+        """Test loading icebox_list_id from config."""
+        import yaml
+        from trellm.config import load_config
+
+        config_data = {
+            "trello": {
+                "api_key": "key",
+                "api_token": "token",
+                "board_id": "board",
+                "todo_list_id": "todo",
+                "icebox_list_id": "icebox-123",
+            },
+        }
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml.dump(config_data))
+
+        config = load_config(str(config_file))
+
+        assert config.trello.icebox_list_id == "icebox-123"
+
+    def test_icebox_list_id_optional(self, tmp_path):
+        """Test that icebox_list_id is optional."""
+        import yaml
+        from trellm.config import load_config
+
+        config_data = {
+            "trello": {
+                "api_key": "key",
+                "api_token": "token",
+                "board_id": "board",
+                "todo_list_id": "todo",
+                # No icebox_list_id
+            },
+        }
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml.dump(config_data))
+
+        config = load_config(str(config_file))
+
+        assert config.trello.icebox_list_id is None
+
+
+class TestTrelloClientMethods:
+    """Tests for new TrelloClient methods."""
+
+    @pytest.mark.asyncio
+    async def test_find_card_by_name_found(self):
+        """Test finding a card by name when it exists."""
+        config = TrelloConfig(
+            api_key="key",
+            api_token="token",
+            board_id="board",
+            todo_list_id="todo",
+        )
+        client = TrelloClient(config)
+
+        mock_response = [
+            {"id": "card1", "name": "Other Card", "desc": "", "url": "url1", "dateLastActivity": "2026-01-01"},
+            {"id": "card2", "name": "Target Card", "desc": "desc", "url": "url2", "dateLastActivity": "2026-01-02"},
+        ]
+
+        with patch.object(client, "_request", return_value=mock_response):
+            result = await client.find_card_by_name("list-123", "target card")
+
+        assert result is not None
+        assert result.id == "card2"
+        assert result.name == "Target Card"
+
+    @pytest.mark.asyncio
+    async def test_find_card_by_name_not_found(self):
+        """Test finding a card by name when it doesn't exist."""
+        config = TrelloConfig(
+            api_key="key",
+            api_token="token",
+            board_id="board",
+            todo_list_id="todo",
+        )
+        client = TrelloClient(config)
+
+        mock_response = [
+            {"id": "card1", "name": "Other Card", "desc": "", "url": "url1", "dateLastActivity": "2026-01-01"},
+        ]
+
+        with patch.object(client, "_request", return_value=mock_response):
+            result = await client.find_card_by_name("list-123", "nonexistent")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_create_card(self):
+        """Test creating a new card."""
+        config = TrelloConfig(
+            api_key="key",
+            api_token="token",
+            board_id="board",
+            todo_list_id="todo",
+        )
+        client = TrelloClient(config)
+
+        mock_response = {
+            "id": "new-card-id",
+            "name": "New Card",
+            "desc": "Description",
+            "url": "https://trello.com/c/abc",
+            "dateLastActivity": "2026-01-24",
+        }
+
+        with patch.object(client, "_request", return_value=mock_response) as mock_req:
+            result = await client.create_card("list-123", "New Card", "Description")
+
+            mock_req.assert_called_once_with(
+                "POST",
+                "/cards",
+                params={
+                    "idList": "list-123",
+                    "name": "New Card",
+                    "desc": "Description",
+                },
+            )
+
+        assert result.id == "new-card-id"
+        assert result.name == "New Card"
+        assert result.description == "Description"
+
+    @pytest.mark.asyncio
+    async def test_update_card_description(self):
+        """Test updating a card's description."""
+        config = TrelloConfig(
+            api_key="key",
+            api_token="token",
+            board_id="board",
+            todo_list_id="todo",
+        )
+        client = TrelloClient(config)
+
+        with patch.object(client, "_request", return_value={}) as mock_req:
+            await client.update_card_description("card-123", "New description")
+
+            mock_req.assert_called_once_with(
+                "PUT",
+                "/cards/card-123",
+                json_data={"desc": "New description"},
+            )

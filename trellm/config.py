@@ -20,6 +20,8 @@ class TrelloConfig:
     # Optional: move completed cards to a different board
     done_board_id: Optional[str] = None
     done_list_id: Optional[str] = None
+    # Optional: ICE BOX list for maintenance suggestions
+    icebox_list_id: Optional[str] = None
 
 
 @dataclass
@@ -117,6 +119,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
         ready_to_try_list_id=trello_data.get("ready_to_try_list_id"),
         done_board_id=trello_data.get("done_board_id"),
         done_list_id=trello_data.get("done_list_id"),
+        icebox_list_id=trello_data.get("icebox_list_id"),
     )
 
     # Build project configs
