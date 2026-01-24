@@ -25,6 +25,7 @@ from trellm.claude import (
     _parse_usage_limit,
     _get_session_jsonl_path,
     _read_token_usage_from_jsonl,
+    _get_context_size_from_jsonl,
     CLAUDE_PROJECTS_DIR,
 )
 from trellm.config import ClaudeConfig
@@ -529,9 +530,10 @@ class TestClaudeRunnerCompact:
             pytest.fail("Could not find -p argument in command")
 
     @pytest.mark.asyncio
-    async def test_run_compact_logs_token_counts(self, runner, caplog):
-        """Test that /compact logs token counts before and after."""
+    async def test_run_compact_logs_context_sizes(self, runner, caplog):
+        """Test that /compact logs context sizes before and after."""
         import logging
+        from pathlib import Path
         caplog.set_level(logging.INFO)
 
         mock_proc = AsyncMock()
@@ -543,45 +545,36 @@ class TestClaudeRunnerCompact:
             )
         )
 
-        # Mock cost info before and after compaction
-        before_cost = CostInfo(
-            input_tokens=100000,
-            output_tokens=20000,
-            cache_creation_tokens=5000,
-            cache_read_tokens=10000,
-        )
-        after_cost = CostInfo(
-            input_tokens=30000,
-            output_tokens=5000,
-            cache_creation_tokens=1000,
-            cache_read_tokens=2000,
-        )
-
         call_count = 0
 
-        async def mock_run_cost(*args, **kwargs):
+        def mock_get_session_jsonl_path(session_id, working_dir):
+            # Return a mock path for both sessions
+            return Path(f"/mock/path/{session_id}.jsonl")
+
+        def mock_get_context_size_from_jsonl(jsonl_path):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                return before_cost  # Before compaction
-            return after_cost  # After compaction
+                return 125000  # Before compaction context size
+            return 36000  # After compaction context size
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
-            with patch.object(runner, "_run_cost", side_effect=mock_run_cost):
-                result = await runner._run_compact(
-                    session_id="old-session-456",
-                    working_dir="/tmp/test",
-                    prefix="[test] ",
-                )
+            with patch("trellm.claude._get_session_jsonl_path", side_effect=mock_get_session_jsonl_path):
+                with patch("trellm.claude._get_context_size_from_jsonl", side_effect=mock_get_context_size_from_jsonl):
+                    result = await runner._run_compact(
+                        session_id="old-session-456",
+                        working_dir="/tmp/test",
+                        prefix="[test] ",
+                    )
 
         assert result == "new-session-123"
 
-        # Check that logs contain token information
+        # Check that logs contain context size information
         log_messages = [r.message for r in caplog.records]
         # Before compaction log
-        before_log = [m for m in log_messages if "Tokens before compaction" in m]
+        before_log = [m for m in log_messages if "Context size before compaction" in m]
         assert len(before_log) == 1
-        assert "125000" in before_log[0]  # 100000 + 20000 + 5000
+        assert "125000" in before_log[0]
         # After compaction log with reduction
         after_log = [m for m in log_messages if "/compact successful" in m and "reduction" in m]
         assert len(after_log) == 1
@@ -591,8 +584,9 @@ class TestClaudeRunnerCompact:
 
     @pytest.mark.asyncio
     async def test_run_compact_logs_only_after_when_before_fails(self, runner, caplog):
-        """Test that /compact logs after tokens even when before tokens fail."""
+        """Test that /compact logs after context size even when before fails."""
         import logging
+        from pathlib import Path
         caplog.set_level(logging.INFO)
 
         mock_proc = AsyncMock()
@@ -604,37 +598,34 @@ class TestClaudeRunnerCompact:
             )
         )
 
-        after_cost = CostInfo(
-            input_tokens=30000,
-            output_tokens=5000,
-            cache_creation_tokens=1000,
-            cache_read_tokens=2000,
-        )
-
         call_count = 0
 
-        async def mock_run_cost(*args, **kwargs):
+        def mock_get_session_jsonl_path(session_id, working_dir):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                return None  # Before compaction fails
-            return after_cost  # After compaction
+                return None  # Before session path not found
+            return Path(f"/mock/path/{session_id}.jsonl")
+
+        def mock_get_context_size_from_jsonl(jsonl_path):
+            return 36000  # After compaction context size
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
-            with patch.object(runner, "_run_cost", side_effect=mock_run_cost):
-                result = await runner._run_compact(
-                    session_id="old-session-456",
-                    working_dir="/tmp/test",
-                    prefix="[test] ",
-                )
+            with patch("trellm.claude._get_session_jsonl_path", side_effect=mock_get_session_jsonl_path):
+                with patch("trellm.claude._get_context_size_from_jsonl", side_effect=mock_get_context_size_from_jsonl):
+                    result = await runner._run_compact(
+                        session_id="old-session-456",
+                        working_dir="/tmp/test",
+                        prefix="[test] ",
+                    )
 
         assert result == "new-session-123"
 
-        # Check that logs contain after-compaction token information
+        # Check that logs contain after-compaction context size information
         log_messages = [r.message for r in caplog.records]
-        after_log = [m for m in log_messages if "/compact successful" in m and "tokens after" in m]
+        after_log = [m for m in log_messages if "/compact successful" in m and "context size after" in m]
         assert len(after_log) == 1
-        assert "36000" in after_log[0]  # Total after tokens
+        assert "36000" in after_log[0]  # Context size after
 
 
 class TestClaudeRunnerRetryLogic:
@@ -1435,6 +1426,143 @@ class TestReadTokenUsageFromJsonl:
         assert result["output_tokens"] == 0
         assert result["cache_creation_input_tokens"] == 0
         assert result["cache_read_input_tokens"] == 0
+
+
+class TestGetContextSizeFromJsonl:
+    """Tests for _get_context_size_from_jsonl helper function."""
+
+    def test_returns_last_input_tokens(self, tmp_path):
+        """Test that it returns the input_tokens from the last message with usage."""
+        jsonl_file = tmp_path / "test.jsonl"
+        # Write multiple lines with usage data - context grows over time
+        lines = [
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "usage": {
+                        "input_tokens": 1000,  # First message - small context
+                        "output_tokens": 50,
+                    }
+                }
+            }),
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "usage": {
+                        "input_tokens": 5000,  # Second message - larger context
+                        "output_tokens": 100,
+                    }
+                }
+            }),
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "usage": {
+                        "input_tokens": 10000,  # Last message - largest context
+                        "output_tokens": 200,
+                    }
+                }
+            }),
+        ]
+        jsonl_file.write_text("\n".join(lines))
+
+        result = _get_context_size_from_jsonl(jsonl_file)
+
+        # Should return the last message's input_tokens
+        assert result == 10000
+
+    def test_handles_empty_file(self, tmp_path):
+        """Test that empty file returns zero."""
+        jsonl_file = tmp_path / "empty.jsonl"
+        jsonl_file.touch()
+
+        result = _get_context_size_from_jsonl(jsonl_file)
+
+        assert result == 0
+
+    def test_handles_lines_without_usage(self, tmp_path):
+        """Test that lines without usage data are skipped."""
+        jsonl_file = tmp_path / "test.jsonl"
+        lines = [
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "usage": {
+                        "input_tokens": 5000,
+                        "output_tokens": 50,
+                    }
+                }
+            }),
+            # These lines don't have usage - should be skipped
+            json.dumps({"type": "user", "message": {"content": "Hello"}}),
+            json.dumps({"type": "system", "message": {"content": "System message"}}),
+        ]
+        jsonl_file.write_text("\n".join(lines))
+
+        result = _get_context_size_from_jsonl(jsonl_file)
+
+        # Should return the last message WITH usage data
+        assert result == 5000
+
+    def test_skips_zero_input_tokens(self, tmp_path):
+        """Test that messages with zero input_tokens are skipped."""
+        jsonl_file = tmp_path / "test.jsonl"
+        lines = [
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "usage": {
+                        "input_tokens": 8000,  # Real context size
+                        "output_tokens": 100,
+                    }
+                }
+            }),
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "usage": {
+                        "input_tokens": 0,  # Zero - should be skipped
+                        "output_tokens": 50,
+                    }
+                }
+            }),
+        ]
+        jsonl_file.write_text("\n".join(lines))
+
+        result = _get_context_size_from_jsonl(jsonl_file)
+
+        # Should return the last non-zero input_tokens
+        assert result == 8000
+
+    def test_handles_malformed_json(self, tmp_path):
+        """Test that malformed JSON lines are skipped."""
+        jsonl_file = tmp_path / "test.jsonl"
+        lines = [
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "usage": {
+                        "input_tokens": 3000,
+                        "output_tokens": 50,
+                    }
+                }
+            }),
+            "not valid json",
+        ]
+        jsonl_file.write_text("\n".join(lines))
+
+        result = _get_context_size_from_jsonl(jsonl_file)
+
+        assert result == 3000
+
+    def test_handles_file_read_error(self, tmp_path):
+        """Test that file read errors return zero."""
+        # Non-existent file
+        jsonl_file = tmp_path / "nonexistent.jsonl"
+
+        result = _get_context_size_from_jsonl(jsonl_file)
+
+        assert result == 0
 
 
 class TestUsageLimitInfo:

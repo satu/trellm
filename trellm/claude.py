@@ -260,6 +260,44 @@ def _read_token_usage_from_jsonl(jsonl_path: Path) -> dict:
     return totals
 
 
+def _get_context_size_from_jsonl(jsonl_path: Path) -> int:
+    """Get the current context size from the last message in a session JSONL file.
+
+    This returns the input_tokens from the LAST message in the session,
+    which represents the current context window size. This is different from
+    the total cumulative tokens used (which _read_token_usage_from_jsonl returns).
+
+    For compaction comparison, we want to compare context sizes, not cumulative usage.
+
+    Args:
+        jsonl_path: Path to the session JSONL file
+
+    Returns:
+        The input_tokens from the last message, or 0 if not found
+    """
+    last_input_tokens = 0
+
+    try:
+        with open(jsonl_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    usage = data.get("message", {}).get("usage", {})
+                    if usage:
+                        input_tokens = usage.get("input_tokens", 0)
+                        if input_tokens > 0:
+                            last_input_tokens = input_tokens
+                except json.JSONDecodeError:
+                    continue
+    except (OSError, IOError) as e:
+        logger.debug("Could not read JSONL file %s: %s", jsonl_path, e)
+
+    return last_input_tokens
+
+
 @dataclass
 class CostInfo:
     """Cost and usage information from Claude Code /cost command."""
@@ -437,26 +475,16 @@ class ClaudeRunner:
         Returns:
             New session ID if successful, None otherwise
         """
-        # Get token counts before compaction
-        before_cost = await self._run_cost(
-            session_id=session_id,
-            working_dir=working_dir,
-            prefix=prefix,
-        )
-        before_tokens = 0
-        if before_cost:
-            before_tokens = (
-                before_cost.input_tokens
-                + before_cost.output_tokens
-                + before_cost.cache_creation_tokens
-            )
+        # Get context size before compaction (last message's input tokens)
+        # This represents the actual context window size, not cumulative usage
+        before_context_size = 0
+        before_jsonl_path = _get_session_jsonl_path(session_id, working_dir)
+        if before_jsonl_path:
+            before_context_size = _get_context_size_from_jsonl(before_jsonl_path)
             logger.info(
-                "%sTokens before compaction: %d (input: %d, output: %d, cache_creation: %d)",
+                "%sContext size before compaction: %d tokens",
                 prefix,
-                before_tokens,
-                before_cost.input_tokens,
-                before_cost.output_tokens,
-                before_cost.cache_creation_tokens,
+                before_context_size,
             )
 
         # Build compact command with optional custom instructions
@@ -523,41 +551,30 @@ class ClaudeRunner:
                 logger.warning("%s/compact completed but no session ID found", prefix)
                 return None
 
-            # Get token counts after compaction
-            after_cost = await self._run_cost(
-                session_id=new_session_id,
-                working_dir=working_dir,
-                prefix=prefix,
-            )
-            after_tokens = 0
-            if after_cost:
-                after_tokens = (
-                    after_cost.input_tokens
-                    + after_cost.output_tokens
-                    + after_cost.cache_creation_tokens
-                )
+            # Get context size after compaction (last message's input tokens)
+            after_context_size = 0
+            after_jsonl_path = _get_session_jsonl_path(new_session_id, working_dir)
+            if after_jsonl_path:
+                after_context_size = _get_context_size_from_jsonl(after_jsonl_path)
 
-            # Log compaction results with token comparison
-            if before_tokens > 0 and after_tokens > 0:
-                reduction = before_tokens - after_tokens
-                reduction_pct = (reduction / before_tokens) * 100 if before_tokens > 0 else 0
+            # Log compaction results with context size comparison
+            if before_context_size > 0 and after_context_size > 0:
+                reduction = before_context_size - after_context_size
+                reduction_pct = (reduction / before_context_size) * 100
                 logger.info(
                     "%s/compact successful: %d -> %d tokens (-%d, %.1f%% reduction), new session: %s",
                     prefix,
-                    before_tokens,
-                    after_tokens,
+                    before_context_size,
+                    after_context_size,
                     reduction,
                     reduction_pct,
                     new_session_id,
                 )
-            elif after_cost:
+            elif after_context_size > 0:
                 logger.info(
-                    "%s/compact successful: tokens after: %d (input: %d, output: %d, cache_creation: %d), new session: %s",
+                    "%s/compact successful: context size after: %d tokens, new session: %s",
                     prefix,
-                    after_tokens,
-                    after_cost.input_tokens,
-                    after_cost.output_tokens,
-                    after_cost.cache_creation_tokens,
+                    after_context_size,
                     new_session_id,
                 )
             else:
