@@ -1163,23 +1163,23 @@ class TestUsageLimitInfo:
         info = UsageLimitInfo(utilization=50.0, resets_at=None)
         assert info.format_reset_time() == "N/A"
 
-    def test_format_reset_time_hours_and_minutes(self):
-        """Test formatting reset time with hours and minutes."""
-        from datetime import timedelta
-        reset_time = datetime.now(timezone.utc) + timedelta(hours=2, minutes=30)
+    def test_format_reset_time_shows_date_and_time(self):
+        """Test formatting reset time shows actual date and time."""
+        # Use a fixed time for predictable output
+        reset_time = datetime(2026, 1, 24, 17, 59, 0, tzinfo=timezone.utc)
         info = UsageLimitInfo(utilization=50.0, resets_at=reset_time)
         result = info.format_reset_time()
-        assert "2h" in result
-        assert "m" in result
+        # Should show "Jan 24, 2026 5:59 PM UTC"
+        assert "Jan 24, 2026" in result
+        assert "5:59 PM UTC" in result
 
-    def test_format_reset_time_minutes_only(self):
-        """Test formatting reset time with only minutes."""
-        from datetime import timedelta
-        reset_time = datetime.now(timezone.utc) + timedelta(minutes=45)
+    def test_format_reset_time_morning_hours(self):
+        """Test formatting reset time in morning hours."""
+        reset_time = datetime(2026, 3, 15, 9, 30, 0, tzinfo=timezone.utc)
         info = UsageLimitInfo(utilization=50.0, resets_at=reset_time)
         result = info.format_reset_time()
-        assert "h" not in result
-        assert "m" in result
+        assert "Mar 15, 2026" in result
+        assert "9:30 AM UTC" in result
 
     def test_format_reset_time_past(self):
         """Test formatting when reset time is in the past."""

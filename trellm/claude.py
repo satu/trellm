@@ -45,18 +45,14 @@ class UsageLimitInfo:
     resets_at: Optional[datetime] = None  # When the limit resets
 
     def format_reset_time(self) -> str:
-        """Format reset time as human-readable string."""
+        """Format reset time as human-readable date/time string."""
         if not self.resets_at:
             return "N/A"
         now = datetime.now(timezone.utc)
-        delta = self.resets_at - now
-        if delta.total_seconds() < 0:
+        if self.resets_at <= now:
             return "now"
-        hours = int(delta.total_seconds() // 3600)
-        minutes = int((delta.total_seconds() % 3600) // 60)
-        if hours > 0:
-            return f"{hours}h {minutes}m"
-        return f"{minutes}m"
+        # Format as "Jan 24, 2026 5:59 PM UTC"
+        return self.resets_at.strftime("%b %d, %Y %-I:%M %p UTC")
 
 
 @dataclass
@@ -80,25 +76,25 @@ class ClaudeUsageLimits:
         if self.five_hour:
             lines.append(
                 f"- **5-Hour Session:** {self.five_hour.utilization:.0f}% used "
-                f"(resets in {self.five_hour.format_reset_time()})"
+                f"(resets at {self.five_hour.format_reset_time()})"
             )
 
         if self.seven_day:
             lines.append(
                 f"- **7-Day Weekly:** {self.seven_day.utilization:.0f}% used "
-                f"(resets in {self.seven_day.format_reset_time()})"
+                f"(resets at {self.seven_day.format_reset_time()})"
             )
 
         if self.seven_day_opus and self.seven_day_opus.utilization > 0:
             lines.append(
                 f"- **7-Day Opus:** {self.seven_day_opus.utilization:.0f}% used "
-                f"(resets in {self.seven_day_opus.format_reset_time()})"
+                f"(resets at {self.seven_day_opus.format_reset_time()})"
             )
 
         if self.seven_day_sonnet and self.seven_day_sonnet.utilization > 0:
             lines.append(
                 f"- **7-Day Sonnet:** {self.seven_day_sonnet.utilization:.0f}% used "
-                f"(resets in {self.seven_day_sonnet.format_reset_time()})"
+                f"(resets at {self.seven_day_sonnet.format_reset_time()})"
             )
 
         return "\n".join(lines)
