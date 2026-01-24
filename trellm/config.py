@@ -28,6 +28,7 @@ class ProjectConfig:
 
     working_dir: str
     session_id: Optional[str] = None
+    compact_prompt: Optional[str] = None  # Custom instructions for /compact
 
 
 @dataclass
@@ -58,6 +59,11 @@ class Config:
         """Get initial session ID for a project (from config file)."""
         proj = self.claude.projects.get(project)
         return proj.session_id if proj else None
+
+    def get_compact_prompt(self, project: str) -> Optional[str]:
+        """Get custom compaction prompt for a project."""
+        proj = self.claude.projects.get(project)
+        return proj.compact_prompt if proj else None
 
 
 def load_config(config_path: Optional[str] = None) -> Config:
@@ -105,6 +111,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
         projects[name] = ProjectConfig(
             working_dir=proj_data.get("working_dir", ""),
             session_id=proj_data.get("session_id"),
+            compact_prompt=proj_data.get("compact_prompt"),
         )
 
     # Build Claude config

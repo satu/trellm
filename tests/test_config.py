@@ -51,6 +51,7 @@ class TestLoadConfig:
                     "myproject": {
                         "working_dir": "~/src/myproject",
                         "session_id": "abc123",
+                        "compact_prompt": "Preserve API patterns",
                     }
                 },
             },
@@ -66,6 +67,7 @@ class TestLoadConfig:
         assert config.claude.binary == "/usr/bin/claude"
         assert "myproject" in config.claude.projects
         assert config.claude.projects["myproject"].session_id == "abc123"
+        assert config.claude.projects["myproject"].compact_prompt == "Preserve API patterns"
 
     def test_env_vars_override_file(self, tmp_path, monkeypatch):
         """Test that environment variables override file values."""
@@ -147,6 +149,34 @@ class TestConfig:
 
         assert config.get_initial_session_id("myproject") == "abc123"
         assert config.get_initial_session_id("unknown") is None
+
+    def test_get_compact_prompt(self):
+        """Test get_compact_prompt method."""
+        from trellm.config import TrelloConfig, ClaudeConfig
+
+        config = Config(
+            trello=TrelloConfig(
+                api_key="",
+                api_token="",
+                board_id="",
+                todo_list_id="",
+            ),
+            claude=ClaudeConfig(
+                projects={
+                    "myproject": ProjectConfig(
+                        working_dir="~/src/myproject",
+                        compact_prompt="Preserve API patterns and test conventions",
+                    ),
+                    "nocompact": ProjectConfig(
+                        working_dir="~/src/nocompact",
+                    ),
+                }
+            ),
+        )
+
+        assert config.get_compact_prompt("myproject") == "Preserve API patterns and test conventions"
+        assert config.get_compact_prompt("nocompact") is None
+        assert config.get_compact_prompt("unknown") is None
 
 
 class TestConfigComparison:
@@ -277,6 +307,35 @@ class TestConfigComparison:
         assert not configs_equal(config1, config2)
         changes = compare_configs(config1, config2)
         assert any("proj1.working_dir" in c for c in changes)
+
+    def test_configs_equal_project_compact_prompt_changed(self):
+        """Test detecting project compact_prompt change."""
+        config1 = self._make_config(
+            claude=ClaudeConfig(
+                binary="claude",
+                timeout=600,
+                yolo=False,
+                projects={"proj1": ProjectConfig(
+                    working_dir="~/src/proj1",
+                    compact_prompt="Old prompt",
+                )},
+            )
+        )
+        config2 = self._make_config(
+            claude=ClaudeConfig(
+                binary="claude",
+                timeout=600,
+                yolo=False,
+                projects={"proj1": ProjectConfig(
+                    working_dir="~/src/proj1",
+                    compact_prompt="New prompt",
+                )},
+            )
+        )
+
+        assert not configs_equal(config1, config2)
+        changes = compare_configs(config1, config2)
+        assert any("proj1.compact_prompt" in c for c in changes)
 
 
 class TestParseProject:

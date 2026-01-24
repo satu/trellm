@@ -188,6 +188,7 @@ class ClaudeRunner:
         session_id: str,
         working_dir: Optional[str],
         prefix: str,
+        compact_prompt: Optional[str] = None,
     ) -> Optional[str]:
         """Run /compact command on a session to reduce context size.
 
@@ -195,16 +196,23 @@ class ClaudeRunner:
             session_id: The session ID to compact
             working_dir: Working directory for Claude Code
             prefix: Project prefix for logging
+            compact_prompt: Optional custom instructions for compaction
 
         Returns:
             New session ID if successful, None otherwise
         """
-        logger.info("%sRunning /compact to reduce context size", prefix)
+        # Build compact command with optional custom instructions
+        compact_cmd = "/compact"
+        if compact_prompt:
+            compact_cmd = f"/compact {compact_prompt}"
+            logger.info("%sRunning /compact with custom prompt: %s", prefix, compact_prompt[:50])
+        else:
+            logger.info("%sRunning /compact to reduce context size", prefix)
 
         cmd = [
             self.binary,
             "-p",
-            "/compact",
+            compact_cmd,
             "--resume",
             session_id,
             "--output-format",
@@ -354,6 +362,7 @@ class ClaudeRunner:
         session_id: Optional[str],
         working_dir: Optional[str],
         last_card_id: Optional[str] = None,
+        compact_prompt: Optional[str] = None,
     ) -> ClaudeResult:
         """Run Claude Code as a subprocess with the given task.
 
@@ -371,6 +380,7 @@ class ClaudeRunner:
             session_id: Optional session ID to resume
             working_dir: Working directory for Claude Code
             last_card_id: Optional card ID of the last processed card for this project
+            compact_prompt: Optional custom instructions for /compact
 
         Returns:
             ClaudeResult with success status, new session ID, and output
@@ -393,6 +403,7 @@ class ClaudeRunner:
                 session_id=current_session_id,
                 working_dir=working_dir,
                 prefix=prefix,
+                compact_prompt=compact_prompt,
             )
             if new_session_id:
                 current_session_id = new_session_id
@@ -473,6 +484,7 @@ class ClaudeRunner:
                     session_id=session_to_compact,
                     working_dir=working_dir,
                     prefix=prefix,
+                    compact_prompt=compact_prompt,
                 )
 
                 if new_session_id:

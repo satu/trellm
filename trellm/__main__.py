@@ -81,6 +81,10 @@ def compare_configs(old: Config, new: Config) -> list[str]:
             changes.append(
                 f"{proj}.session_id: {old_proj.session_id} → {new_proj.session_id}"
             )
+        if old_proj.compact_prompt != new_proj.compact_prompt:
+            changes.append(
+                f"{proj}.compact_prompt: {old_proj.compact_prompt} → {new_proj.compact_prompt}"
+            )
 
     # Compare Trello config (only relevant fields)
     if old.trello.ready_to_try_list_id != new.trello.ready_to_try_list_id:
@@ -158,6 +162,7 @@ async def process_cards(
                 session_id=session_id,
                 working_dir=config.get_working_dir(project),
                 last_card_id=last_card_id,
+                compact_prompt=config.get_compact_prompt(project),
             )
 
             # Update session ID and last card ID for next task
@@ -214,6 +219,7 @@ async def process_card_for_project(
                 session_id=session_id,
                 working_dir=config.get_working_dir(project),
                 last_card_id=last_card_id,
+                compact_prompt=config.get_compact_prompt(project),
             )
 
             # Update session ID and last card ID for next task

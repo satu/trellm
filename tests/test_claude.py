@@ -464,6 +464,38 @@ class TestClaudeRunnerCompact:
 
         assert result is None
 
+    @pytest.mark.asyncio
+    async def test_run_compact_with_custom_prompt(self, runner):
+        """Test /compact with custom prompt passes prompt to command."""
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate = AsyncMock(
+            return_value=(
+                b'{"type":"result","session_id":"new-session-123"}\n',
+                b"",
+            )
+        )
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+            result = await runner._run_compact(
+                session_id="old-session-456",
+                working_dir="/tmp/test",
+                prefix="[test] ",
+                compact_prompt="Preserve API patterns and test conventions",
+            )
+
+        assert result == "new-session-123"
+        # Verify the prompt was passed correctly
+        call_args = mock_exec.call_args
+        cmd_args = call_args[0]  # positional args
+        # Find the -p argument
+        for i, arg in enumerate(cmd_args):
+            if arg == "-p" and i + 1 < len(cmd_args):
+                assert cmd_args[i + 1] == "/compact Preserve API patterns and test conventions"
+                break
+        else:
+            pytest.fail("Could not find -p argument in command")
+
 
 class TestClaudeRunnerRetryLogic:
     """Tests for retry logic in run method."""
