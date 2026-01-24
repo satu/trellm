@@ -10,6 +10,7 @@ from typing import Optional
 
 from .claude import ClaudeRunner, fetch_claude_usage_limits
 from .config import Config, load_config
+from .maintenance import run_maintenance, should_run_maintenance
 from .state import StateManager
 from .trello import TrelloClient, TrelloCard
 
@@ -283,6 +284,47 @@ async def process_cards(
             logger.info("Completed card %s", card.id)
             processed_count += 1
 
+            # Increment ticket count and check if maintenance is needed
+            ticket_count = state.increment_ticket_count(project)
+            maintenance_config = config.get_maintenance_config(project)
+
+            if should_run_maintenance(ticket_count, maintenance_config):
+                logger.info(
+                    "[%s] Triggering maintenance (ticket #%d)",
+                    project,
+                    ticket_count,
+                )
+                working_dir = config.get_working_dir(project)
+                if working_dir and maintenance_config:
+                    maint_result = await run_maintenance(
+                        project=project,
+                        working_dir=working_dir,
+                        session_id=result.session_id,
+                        claude_config=config.claude,
+                        maintenance_config=maintenance_config,
+                        ticket_count=ticket_count,
+                        last_maintenance=state.get_last_maintenance(project),
+                    )
+                    if maint_result.success:
+                        state.set_last_maintenance(project)
+                        if maint_result.session_id:
+                            state.set_session(
+                                project,
+                                maint_result.session_id,
+                                last_card_id=card.id,
+                            )
+                        logger.info(
+                            "[%s] Maintenance completed: %s",
+                            project,
+                            maint_result.summary[:100],
+                        )
+                    else:
+                        logger.warning(
+                            "[%s] Maintenance failed: %s",
+                            project,
+                            maint_result.summary[:100],
+                        )
+
         except Exception as e:
             logger.error("Failed to process card %s: %s", card.id, e)
             # Leave card in TODO for retry; Claude Code handles comments
@@ -353,6 +395,49 @@ async def process_card_for_project(
             state.mark_processed(card.id)
             await trello.move_to_ready(card.id)
             logger.info("[%s] Completed card %s", project, card.id)
+
+            # Increment ticket count and check if maintenance is needed
+            ticket_count = state.increment_ticket_count(project)
+            maintenance_config = config.get_maintenance_config(project)
+
+            if should_run_maintenance(ticket_count, maintenance_config):
+                logger.info(
+                    "[%s] Triggering maintenance (ticket #%d)",
+                    project,
+                    ticket_count,
+                )
+                working_dir = config.get_working_dir(project)
+                if working_dir and maintenance_config:
+                    maint_result = await run_maintenance(
+                        project=project,
+                        working_dir=working_dir,
+                        session_id=result.session_id,
+                        claude_config=config.claude,
+                        maintenance_config=maintenance_config,
+                        ticket_count=ticket_count,
+                        last_maintenance=state.get_last_maintenance(project),
+                    )
+                    if maint_result.success:
+                        state.set_last_maintenance(project)
+                        # Update session ID if maintenance returned a new one
+                        if maint_result.session_id:
+                            state.set_session(
+                                project,
+                                maint_result.session_id,
+                                last_card_id=card.id,
+                            )
+                        logger.info(
+                            "[%s] Maintenance completed: %s",
+                            project,
+                            maint_result.summary[:100],
+                        )
+                    else:
+                        logger.warning(
+                            "[%s] Maintenance failed: %s",
+                            project,
+                            maint_result.summary[:100],
+                        )
+
             return card.id
 
         except Exception as e:

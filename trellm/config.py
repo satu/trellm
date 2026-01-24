@@ -23,12 +23,21 @@ class TrelloConfig:
 
 
 @dataclass
+class MaintenanceConfig:
+    """Maintenance configuration for a project."""
+
+    enabled: bool = False
+    interval: int = 10  # Run every N tickets
+
+
+@dataclass
 class ProjectConfig:
     """Per-project configuration."""
 
     working_dir: str
     session_id: Optional[str] = None
     compact_prompt: Optional[str] = None  # Custom instructions for /compact
+    maintenance: Optional[MaintenanceConfig] = None
 
 
 @dataclass
@@ -64,6 +73,11 @@ class Config:
         """Get custom compaction prompt for a project."""
         proj = self.claude.projects.get(project)
         return proj.compact_prompt if proj else None
+
+    def get_maintenance_config(self, project: str) -> Optional[MaintenanceConfig]:
+        """Get maintenance configuration for a project."""
+        proj = self.claude.projects.get(project)
+        return proj.maintenance if proj else None
 
 
 def load_config(config_path: Optional[str] = None) -> Config:
@@ -108,10 +122,20 @@ def load_config(config_path: Optional[str] = None) -> Config:
     # Build project configs
     projects: dict[str, ProjectConfig] = {}
     for name, proj_data in claude_data.get("projects", {}).items():
+        # Parse maintenance config if present
+        maint_data = proj_data.get("maintenance", {})
+        maintenance = None
+        if maint_data:
+            maintenance = MaintenanceConfig(
+                enabled=maint_data.get("enabled", False),
+                interval=maint_data.get("interval", 10),
+            )
+
         projects[name] = ProjectConfig(
             working_dir=proj_data.get("working_dir", ""),
             session_id=proj_data.get("session_id"),
             compact_prompt=proj_data.get("compact_prompt"),
+            maintenance=maintenance,
         )
 
     # Build Claude config

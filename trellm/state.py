@@ -319,6 +319,36 @@ class StateManager:
             session_data["last_card_id"] = last_card_id
         self._save()
 
+    def get_ticket_count(self, project: str) -> int:
+        """Get the ticket count for a project."""
+        session = self.state.get("sessions", {}).get(project)
+        return session.get("ticket_count", 0) if session else 0
+
+    def increment_ticket_count(self, project: str) -> int:
+        """Increment and return the ticket count for a project.
+
+        This should be called after successfully processing a ticket.
+
+        Returns:
+            The new ticket count after incrementing.
+        """
+        session_data = self.state.setdefault("sessions", {}).setdefault(project, {})
+        count = session_data.get("ticket_count", 0) + 1
+        session_data["ticket_count"] = count
+        self._save()
+        return count
+
+    def get_last_maintenance(self, project: str) -> Optional[str]:
+        """Get the last maintenance timestamp for a project."""
+        session = self.state.get("sessions", {}).get(project)
+        return session.get("last_maintenance") if session else None
+
+    def set_last_maintenance(self, project: str) -> None:
+        """Update the last maintenance timestamp for a project."""
+        session_data = self.state.setdefault("sessions", {}).setdefault(project, {})
+        session_data["last_maintenance"] = datetime.now(timezone.utc).isoformat()
+        self._save()
+
     def get_last_card_id(self, project: str) -> Optional[str]:
         """Get the last processed card ID for a project."""
         session = self.state.get("sessions", {}).get(project)
