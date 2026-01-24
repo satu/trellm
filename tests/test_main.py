@@ -50,6 +50,28 @@ class TestIsStatsCommand:
         assert not is_stats_command("trellm Fix bug")
         assert not is_stats_command("project / stats")  # space breaks command
 
+    def test_stats_not_after_project_name(self):
+        """Test /stats must appear immediately after project name."""
+        # /stats appearing later in the card name should NOT match
+        assert not is_stats_command("trellm problem with the /stats command")
+        assert not is_stats_command("project fix /stats display")
+        assert not is_stats_command("myapp bug in /stats feature")
+
+    def test_stats_with_valid_projects_filter(self):
+        """Test /stats with valid_projects filter."""
+        valid = {"trellm", "myapp"}
+        # Should match when project is in valid set
+        assert is_stats_command("trellm /stats", valid)
+        assert is_stats_command("myapp /stats", valid)
+        # Should NOT match when project is not in valid set
+        assert not is_stats_command("otherproject /stats", valid)
+        assert not is_stats_command("unknown /stats", valid)
+
+    def test_stats_single_word_not_matched(self):
+        """Test that single word cards are not matched."""
+        assert not is_stats_command("/stats")
+        assert not is_stats_command("project")
+
 
 class TestHandleStatsCommand:
     """Tests for handle_stats_command function."""

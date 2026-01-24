@@ -41,17 +41,35 @@ def parse_project(card_name: str) -> str:
     return parts[0].rstrip(":").lower()
 
 
-def is_stats_command(card_name: str) -> bool:
+def is_stats_command(card_name: str, valid_projects: set[str] | None = None) -> bool:
     """Check if a card is a /stats command.
 
-    Supports:
-    - "project /stats"
-    - "project: /stats"
-    - "/stats" (global stats)
+    The /stats command must appear immediately after the project name:
+    - "project /stats" - valid
+    - "project: /stats" - valid
+    - "project problem with /stats" - NOT valid (stats appears later)
+
+    Args:
+        card_name: The card name to check
+        valid_projects: Optional set of valid project names. If provided,
+            only cards with a matching project name will be recognized.
+
+    Returns:
+        True if the card is a valid /stats command, False otherwise.
     """
-    lower_name = card_name.lower()
-    # Check if the card name contains /stats
-    return "/stats" in lower_name
+    parts = card_name.lower().split()
+    if len(parts) < 2:
+        return False
+
+    # Extract project name (first word, strip colon)
+    project = parts[0].rstrip(":")
+
+    # Check if project is valid (if filter provided)
+    if valid_projects is not None and project not in valid_projects:
+        return False
+
+    # /stats must be the second word (immediately after project name)
+    return parts[1] == "/stats"
 
 
 async def handle_stats_command(
@@ -187,7 +205,8 @@ async def process_cards(
                 continue
 
         # Check for /stats command - handle directly without Claude
-        if is_stats_command(card.name):
+        # Only recognize /stats for configured projects
+        if is_stats_command(card.name, set(config.claude.projects.keys())):
             logger.info("Detected /stats command: %s", card.name)
             success = await handle_stats_command(
                 card=card,
@@ -428,7 +447,8 @@ async def run_polling_loop(
                             continue
 
                     # Check for /stats command - handle directly without Claude
-                    if is_stats_command(card.name):
+                    # Only recognize /stats for configured projects
+                    if is_stats_command(card.name, set(current_config.claude.projects.keys())):
                         logger.info("Detected /stats command: %s", card.name)
                         _processing_cards.add(card.id)
                         success = await handle_stats_command(
