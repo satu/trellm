@@ -451,12 +451,11 @@ class StateManager:
             stats["ticket_history"] = stats["ticket_history"][-100:]
 
         logger.info(
-            "Recorded stats for card %s: cost=%s, api=%s, wall=%s, changes=%s",
+            "Recorded stats for card %s: cost=%s, api=%s, wall=%s",
             card_id,
             total_cost or "N/A",
             api_duration or "N/A",
             wall_duration or "N/A",
-            code_changes or "N/A",
         )
         self._save()
 
