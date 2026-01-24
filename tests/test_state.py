@@ -627,3 +627,255 @@ class TestStatsRollup:
         # Entry should still exist unchanged
         assert yesterday in manager.state["stats"]["by_date"]
         assert manager.state["stats"]["by_date"][yesterday]["total_cost_cents"] == 100
+
+
+class TestTokenTracking:
+    """Tests for token usage tracking functionality."""
+
+    def test_record_cost_with_tokens(self, tmp_path):
+        """Test recording cost including token usage."""
+        state_file = tmp_path / "state.json"
+        manager = StateManager(str(state_file))
+
+        manager.record_cost(
+            card_id="card123",
+            project="myproject",
+            total_cost="$1.50",
+            api_duration="2m 30s",
+            wall_duration="5m 15s",
+            code_changes="+100 -50",
+            input_tokens=1000,
+            output_tokens=500,
+            cache_creation_tokens=200,
+            cache_read_tokens=5000,
+        )
+
+        stats = manager.get_stats()
+        assert stats.total_input_tokens == 1000
+        assert stats.total_output_tokens == 500
+        assert stats.total_cache_creation_tokens == 200
+        assert stats.total_cache_read_tokens == 5000
+
+    def test_token_aggregation_multiple_tickets(self, tmp_path):
+        """Test that tokens are properly aggregated across tickets."""
+        state_file = tmp_path / "state.json"
+        manager = StateManager(str(state_file))
+
+        manager.record_cost(
+            card_id="card1",
+            project="project1",
+            total_cost="$1.00",
+            input_tokens=1000,
+            output_tokens=200,
+            cache_creation_tokens=100,
+            cache_read_tokens=3000,
+        )
+        manager.record_cost(
+            card_id="card2",
+            project="project2",
+            total_cost="$2.00",
+            input_tokens=2000,
+            output_tokens=400,
+            cache_creation_tokens=150,
+            cache_read_tokens=4000,
+        )
+
+        stats = manager.get_stats()
+        assert stats.total_input_tokens == 3000
+        assert stats.total_output_tokens == 600
+        assert stats.total_cache_creation_tokens == 250
+        assert stats.total_cache_read_tokens == 7000
+
+    def test_token_stats_per_project(self, tmp_path):
+        """Test getting token stats filtered by project."""
+        state_file = tmp_path / "state.json"
+        manager = StateManager(str(state_file))
+
+        manager.record_cost(
+            card_id="card1",
+            project="project1",
+            total_cost="$1.00",
+            input_tokens=1000,
+            output_tokens=200,
+        )
+        manager.record_cost(
+            card_id="card2",
+            project="project2",
+            total_cost="$2.00",
+            input_tokens=2000,
+            output_tokens=400,
+        )
+
+        stats1 = manager.get_stats("project1")
+        assert stats1.total_input_tokens == 1000
+        assert stats1.total_output_tokens == 200
+
+        stats2 = manager.get_stats("project2")
+        assert stats2.total_input_tokens == 2000
+        assert stats2.total_output_tokens == 400
+
+    def test_format_tokens_helper(self, tmp_path):
+        """Test the format_tokens helper method."""
+        state_file = tmp_path / "state.json"
+        manager = StateManager(str(state_file))
+        stats = manager.get_stats()
+
+        # Test small numbers
+        assert stats.format_tokens(0) == "0"
+        assert stats.format_tokens(500) == "500"
+        assert stats.format_tokens(999) == "999"
+
+        # Test K format
+        assert stats.format_tokens(1000) == "1.0K"
+        assert stats.format_tokens(1500) == "1.5K"
+        assert stats.format_tokens(50000) == "50.0K"
+        assert stats.format_tokens(999999) == "1000.0K"
+
+        # Test M format
+        assert stats.format_tokens(1_000_000) == "1.00M"
+        assert stats.format_tokens(2_500_000) == "2.50M"
+        assert stats.format_tokens(10_000_000) == "10.00M"
+
+    def test_total_tokens_property(self, tmp_path):
+        """Test the total_tokens property (input + output)."""
+        state_file = tmp_path / "state.json"
+        manager = StateManager(str(state_file))
+
+        manager.record_cost(
+            card_id="card1",
+            project="project1",
+            total_cost="$1.00",
+            input_tokens=1000,
+            output_tokens=500,
+        )
+
+        stats = manager.get_stats()
+        assert stats.total_tokens == 1500
+        assert stats.total_tokens_formatted == "1.5K"
+
+    def test_token_formatting_properties(self, tmp_path):
+        """Test the various token formatting properties."""
+        state_file = tmp_path / "state.json"
+        manager = StateManager(str(state_file))
+
+        manager.record_cost(
+            card_id="card1",
+            project="project1",
+            total_cost="$1.00",
+            input_tokens=50000,
+            output_tokens=5000,
+            cache_read_tokens=1_000_000,
+        )
+
+        stats = manager.get_stats()
+        assert stats.input_tokens_formatted == "50.0K"
+        assert stats.output_tokens_formatted == "5.0K"
+        assert stats.cache_read_tokens_formatted == "1.00M"
+
+    def test_format_stats_report_includes_tokens(self, tmp_path):
+        """Test that format_stats_report includes token statistics."""
+        state_file = tmp_path / "state.json"
+        manager = StateManager(str(state_file))
+
+        manager.record_cost(
+            card_id="card123",
+            project="myproject",
+            total_cost="$1.00",
+            input_tokens=50000,
+            output_tokens=5000,
+            cache_read_tokens=100000,
+        )
+
+        report = manager.format_stats_report()
+
+        # Check that token section is present
+        assert "Claude Token Usage" in report
+        assert "Total Tokens" in report
+        assert "Input Tokens" in report
+        assert "Output Tokens" in report
+        assert "Cache Read" in report
+
+        # Check formatted values
+        assert "55.0K" in report  # total tokens
+        assert "50.0K" in report  # input tokens
+        assert "5.0K" in report   # output tokens
+        assert "100.0K" in report  # cache read
+
+    def test_ticket_history_includes_tokens(self, tmp_path):
+        """Test that ticket history records include token data."""
+        state_file = tmp_path / "state.json"
+        manager = StateManager(str(state_file))
+
+        manager.record_cost(
+            card_id="card123",
+            project="myproject",
+            total_cost="$1.00",
+            input_tokens=1000,
+            output_tokens=500,
+            cache_creation_tokens=200,
+            cache_read_tokens=5000,
+        )
+
+        history = manager.state["stats"]["ticket_history"]
+        assert len(history) == 1
+        assert history[0]["input_tokens"] == 1000
+        assert history[0]["output_tokens"] == 500
+        assert history[0]["cache_creation_tokens"] == 200
+        assert history[0]["cache_read_tokens"] == 5000
+
+    def test_empty_bucket_includes_token_fields(self, tmp_path):
+        """Test that _empty_bucket includes token fields."""
+        state_file = tmp_path / "state.json"
+        manager = StateManager(str(state_file))
+
+        bucket = manager._empty_bucket()
+        assert "total_input_tokens" in bucket
+        assert "total_output_tokens" in bucket
+        assert "total_cache_creation_tokens" in bucket
+        assert "total_cache_read_tokens" in bucket
+        assert bucket["total_input_tokens"] == 0
+
+    def test_aggregate_into_bucket_includes_tokens(self, tmp_path):
+        """Test that _aggregate_into_bucket handles token fields."""
+        state_file = tmp_path / "state.json"
+        manager = StateManager(str(state_file))
+
+        bucket = manager._empty_bucket()
+        stats = {
+            "total_cost_cents": 100,
+            "total_tickets": 1,
+            "total_input_tokens": 1000,
+            "total_output_tokens": 500,
+            "total_cache_creation_tokens": 100,
+            "total_cache_read_tokens": 5000,
+        }
+
+        manager._aggregate_into_bucket(bucket, stats)
+        manager._aggregate_into_bucket(bucket, stats)
+
+        assert bucket["total_input_tokens"] == 2000
+        assert bucket["total_output_tokens"] == 1000
+        assert bucket["total_cache_creation_tokens"] == 200
+        assert bucket["total_cache_read_tokens"] == 10000
+
+    def test_backward_compatibility_no_tokens(self, tmp_path):
+        """Test backward compatibility with old stats without token data."""
+        state_file = tmp_path / "state.json"
+        manager = StateManager(str(state_file))
+
+        # Simulate old state without token fields
+        manager.state["stats"]["global"] = {
+            "total_cost_cents": 100,
+            "total_tickets": 1,
+            "total_api_duration_seconds": 60,
+            "total_wall_duration_seconds": 120,
+            "total_lines_added": 50,
+            "total_lines_removed": 25,
+            # No token fields
+        }
+
+        # Should not error, tokens should default to 0
+        stats = manager.get_stats()
+        assert stats.total_input_tokens == 0
+        assert stats.total_output_tokens == 0
+        assert stats.total_tokens == 0

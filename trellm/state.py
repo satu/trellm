@@ -35,6 +35,10 @@ class AggregatedStats:
     total_wall_duration_seconds: int = 0
     total_lines_added: int = 0
     total_lines_removed: int = 0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_cache_creation_tokens: int = 0
+    total_cache_read_tokens: int = 0
 
     @property
     def average_cost_cents(self) -> float:
@@ -74,6 +78,40 @@ class AggregatedStats:
         """Wall duration in human-readable format."""
         return self.format_duration(self.total_wall_duration_seconds)
 
+    def format_tokens(self, tokens: int) -> str:
+        """Format token count in human-readable format (K, M suffixes)."""
+        if tokens < 1000:
+            return str(tokens)
+        elif tokens < 1_000_000:
+            return f"{tokens / 1000:.1f}K"
+        else:
+            return f"{tokens / 1_000_000:.2f}M"
+
+    @property
+    def total_tokens(self) -> int:
+        """Total tokens (input + output)."""
+        return self.total_input_tokens + self.total_output_tokens
+
+    @property
+    def total_tokens_formatted(self) -> str:
+        """Total tokens in human-readable format."""
+        return self.format_tokens(self.total_tokens)
+
+    @property
+    def input_tokens_formatted(self) -> str:
+        """Input tokens in human-readable format."""
+        return self.format_tokens(self.total_input_tokens)
+
+    @property
+    def output_tokens_formatted(self) -> str:
+        """Output tokens in human-readable format."""
+        return self.format_tokens(self.total_output_tokens)
+
+    @property
+    def cache_read_tokens_formatted(self) -> str:
+        """Cache read tokens in human-readable format."""
+        return self.format_tokens(self.total_cache_read_tokens)
+
 
 class StateManager:
     """Manages persistent state for TreLLM.
@@ -110,6 +148,10 @@ class StateManager:
                 "total_wall_duration_seconds": 0,
                 "total_lines_added": 0,
                 "total_lines_removed": 0,
+                "total_input_tokens": 0,
+                "total_output_tokens": 0,
+                "total_cache_creation_tokens": 0,
+                "total_cache_read_tokens": 0,
             },
             "by_project": {},
             "by_date": {},
@@ -236,6 +278,10 @@ class StateManager:
             "total_wall_duration_seconds": 0,
             "total_lines_added": 0,
             "total_lines_removed": 0,
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "total_cache_creation_tokens": 0,
+            "total_cache_read_tokens": 0,
         }
 
     def _aggregate_into_bucket(self, bucket: dict, stats: dict) -> None:
@@ -246,6 +292,10 @@ class StateManager:
         bucket["total_wall_duration_seconds"] += stats.get("total_wall_duration_seconds", 0)
         bucket["total_lines_added"] += stats.get("total_lines_added", 0)
         bucket["total_lines_removed"] += stats.get("total_lines_removed", 0)
+        bucket["total_input_tokens"] += stats.get("total_input_tokens", 0)
+        bucket["total_output_tokens"] += stats.get("total_output_tokens", 0)
+        bucket["total_cache_creation_tokens"] += stats.get("total_cache_creation_tokens", 0)
+        bucket["total_cache_read_tokens"] += stats.get("total_cache_read_tokens", 0)
 
     def get_session(self, project: str) -> Optional[str]:
         """Get session ID for a project."""
@@ -362,6 +412,10 @@ class StateManager:
         api_duration: Optional[str] = None,
         wall_duration: Optional[str] = None,
         code_changes: Optional[str] = None,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cache_creation_tokens: int = 0,
+        cache_read_tokens: int = 0,
     ) -> None:
         """Record cost and usage statistics for a completed ticket.
 
@@ -372,6 +426,10 @@ class StateManager:
             api_duration: API duration string (e.g., '2m 30s')
             wall_duration: Wall duration string (e.g., '5m 15s')
             code_changes: Code changes string (e.g., '+500 -200')
+            input_tokens: Number of input tokens used
+            output_tokens: Number of output tokens used
+            cache_creation_tokens: Number of cache creation tokens
+            cache_read_tokens: Number of cache read tokens
         """
         # Parse values
         cost_cents = self._parse_cost(total_cost)
@@ -396,42 +454,55 @@ class StateManager:
         stats["global"]["total_wall_duration_seconds"] += wall_seconds
         stats["global"]["total_lines_added"] += lines_added
         stats["global"]["total_lines_removed"] += lines_removed
+        # Initialize token fields if they don't exist (backward compat)
+        stats["global"].setdefault("total_input_tokens", 0)
+        stats["global"].setdefault("total_output_tokens", 0)
+        stats["global"].setdefault("total_cache_creation_tokens", 0)
+        stats["global"].setdefault("total_cache_read_tokens", 0)
+        stats["global"]["total_input_tokens"] += input_tokens
+        stats["global"]["total_output_tokens"] += output_tokens
+        stats["global"]["total_cache_creation_tokens"] += cache_creation_tokens
+        stats["global"]["total_cache_read_tokens"] += cache_read_tokens
 
         # Update per-project stats
         if project not in stats["by_project"]:
-            stats["by_project"][project] = {
-                "total_cost_cents": 0,
-                "total_tickets": 0,
-                "total_api_duration_seconds": 0,
-                "total_wall_duration_seconds": 0,
-                "total_lines_added": 0,
-                "total_lines_removed": 0,
-            }
+            stats["by_project"][project] = self._empty_bucket()
         proj_stats = stats["by_project"][project]
+        # Initialize token fields if they don't exist (backward compat)
+        proj_stats.setdefault("total_input_tokens", 0)
+        proj_stats.setdefault("total_output_tokens", 0)
+        proj_stats.setdefault("total_cache_creation_tokens", 0)
+        proj_stats.setdefault("total_cache_read_tokens", 0)
         proj_stats["total_cost_cents"] += cost_cents
         proj_stats["total_tickets"] += 1
         proj_stats["total_api_duration_seconds"] += api_seconds
         proj_stats["total_wall_duration_seconds"] += wall_seconds
         proj_stats["total_lines_added"] += lines_added
         proj_stats["total_lines_removed"] += lines_removed
+        proj_stats["total_input_tokens"] += input_tokens
+        proj_stats["total_output_tokens"] += output_tokens
+        proj_stats["total_cache_creation_tokens"] += cache_creation_tokens
+        proj_stats["total_cache_read_tokens"] += cache_read_tokens
 
         # Update per-date stats
         if today not in stats["by_date"]:
-            stats["by_date"][today] = {
-                "total_cost_cents": 0,
-                "total_tickets": 0,
-                "total_api_duration_seconds": 0,
-                "total_wall_duration_seconds": 0,
-                "total_lines_added": 0,
-                "total_lines_removed": 0,
-            }
+            stats["by_date"][today] = self._empty_bucket()
         date_stats = stats["by_date"][today]
+        # Initialize token fields if they don't exist (backward compat)
+        date_stats.setdefault("total_input_tokens", 0)
+        date_stats.setdefault("total_output_tokens", 0)
+        date_stats.setdefault("total_cache_creation_tokens", 0)
+        date_stats.setdefault("total_cache_read_tokens", 0)
         date_stats["total_cost_cents"] += cost_cents
         date_stats["total_tickets"] += 1
         date_stats["total_api_duration_seconds"] += api_seconds
         date_stats["total_wall_duration_seconds"] += wall_seconds
         date_stats["total_lines_added"] += lines_added
         date_stats["total_lines_removed"] += lines_removed
+        date_stats["total_input_tokens"] += input_tokens
+        date_stats["total_output_tokens"] += output_tokens
+        date_stats["total_cache_creation_tokens"] += cache_creation_tokens
+        date_stats["total_cache_read_tokens"] += cache_read_tokens
 
         # Add to ticket history
         ticket_record = {
@@ -442,6 +513,10 @@ class StateManager:
             "wall_duration_seconds": wall_seconds,
             "lines_added": lines_added,
             "lines_removed": lines_removed,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_creation_tokens": cache_creation_tokens,
+            "cache_read_tokens": cache_read_tokens,
             "processed_at": now,
         }
         stats["ticket_history"].append(ticket_record)
@@ -483,6 +558,10 @@ class StateManager:
                 total_wall_duration_seconds=proj_stats.get("total_wall_duration_seconds", 0),
                 total_lines_added=proj_stats.get("total_lines_added", 0),
                 total_lines_removed=proj_stats.get("total_lines_removed", 0),
+                total_input_tokens=proj_stats.get("total_input_tokens", 0),
+                total_output_tokens=proj_stats.get("total_output_tokens", 0),
+                total_cache_creation_tokens=proj_stats.get("total_cache_creation_tokens", 0),
+                total_cache_read_tokens=proj_stats.get("total_cache_read_tokens", 0),
             )
         else:
             # Return global stats
@@ -494,6 +573,10 @@ class StateManager:
                 total_wall_duration_seconds=global_stats.get("total_wall_duration_seconds", 0),
                 total_lines_added=global_stats.get("total_lines_added", 0),
                 total_lines_removed=global_stats.get("total_lines_removed", 0),
+                total_input_tokens=global_stats.get("total_input_tokens", 0),
+                total_output_tokens=global_stats.get("total_output_tokens", 0),
+                total_cache_creation_tokens=global_stats.get("total_cache_creation_tokens", 0),
+                total_cache_read_tokens=global_stats.get("total_cache_read_tokens", 0),
             )
 
     def get_stats_for_period(self, days: int = 30) -> AggregatedStats:
@@ -520,6 +603,10 @@ class StateManager:
             result.total_wall_duration_seconds += date_stats.get("total_wall_duration_seconds", 0)
             result.total_lines_added += date_stats.get("total_lines_added", 0)
             result.total_lines_removed += date_stats.get("total_lines_removed", 0)
+            result.total_input_tokens += date_stats.get("total_input_tokens", 0)
+            result.total_output_tokens += date_stats.get("total_output_tokens", 0)
+            result.total_cache_creation_tokens += date_stats.get("total_cache_creation_tokens", 0)
+            result.total_cache_read_tokens += date_stats.get("total_cache_read_tokens", 0)
 
         return result
 
@@ -546,6 +633,14 @@ class StateManager:
         lines.append(f"- **Lines Removed:** -{global_stats.total_lines_removed}")
         lines.append("")
 
+        # Token usage section (Claude usage statistics)
+        lines.append("### Claude Token Usage (All-Time)")
+        lines.append(f"- **Total Tokens:** {global_stats.total_tokens_formatted}")
+        lines.append(f"- **Input Tokens:** {global_stats.input_tokens_formatted}")
+        lines.append(f"- **Output Tokens:** {global_stats.output_tokens_formatted}")
+        lines.append(f"- **Cache Read:** {global_stats.cache_read_tokens_formatted}")
+        lines.append("")
+
         # Last 30 days
         last_30 = self.get_stats_for_period(30)
         lines.append("### Last 30 Days")
@@ -553,6 +648,7 @@ class StateManager:
         lines.append(f"- **Tickets:** {last_30.total_tickets}")
         if last_30.total_tickets > 0:
             lines.append(f"- **Avg Cost/Ticket:** {last_30.average_cost_dollars}")
+        lines.append(f"- **Tokens:** {last_30.total_tokens_formatted} (in: {last_30.input_tokens_formatted}, out: {last_30.output_tokens_formatted})")
         lines.append("")
 
         # Per-project stats
@@ -566,5 +662,6 @@ class StateManager:
                 if proj_stats.total_tickets > 0:
                     lines.append(f"- Avg: {proj_stats.average_cost_dollars}/ticket")
                 lines.append(f"- Changes: +{proj_stats.total_lines_added} -{proj_stats.total_lines_removed}")
+                lines.append(f"- Tokens: {proj_stats.total_tokens_formatted} (in: {proj_stats.input_tokens_formatted}, out: {proj_stats.output_tokens_formatted})")
 
         return "\n".join(lines)

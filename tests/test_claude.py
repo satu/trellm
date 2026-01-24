@@ -861,6 +861,80 @@ class TestClaudeRunnerCost:
 
         assert result is None
 
+    @pytest.mark.asyncio
+    async def test_run_cost_with_token_usage(self, runner):
+        """Test /cost parsing of token usage data."""
+        json_output = {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "duration_ms": 1000,
+            "duration_api_ms": 5000,
+            "total_cost_usd": 0.25,
+            "usage": {
+                "input_tokens": 1500,
+                "output_tokens": 500,
+                "cache_creation_input_tokens": 200,
+                "cache_read_input_tokens": 30000,
+                "server_tool_use": {"web_search_requests": 0},
+            },
+        }
+
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate = AsyncMock(
+            return_value=(
+                (json.dumps(json_output) + "\n").encode(),
+                b"",
+            )
+        )
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            result = await runner._run_cost(
+                session_id="test-session",
+                working_dir="/tmp/test",
+                prefix="[test] ",
+            )
+
+        assert result is not None
+        assert result.input_tokens == 1500
+        assert result.output_tokens == 500
+        assert result.cache_creation_tokens == 200
+        assert result.cache_read_tokens == 30000
+
+    @pytest.mark.asyncio
+    async def test_run_cost_without_token_usage(self, runner):
+        """Test /cost handles missing usage data gracefully."""
+        json_output = {
+            "type": "result",
+            "duration_ms": 1000,
+            "duration_api_ms": 5000,
+            "total_cost_usd": 0.25,
+            # No usage field
+        }
+
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate = AsyncMock(
+            return_value=(
+                (json.dumps(json_output) + "\n").encode(),
+                b"",
+            )
+        )
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            result = await runner._run_cost(
+                session_id="test-session",
+                working_dir="/tmp/test",
+                prefix="[test] ",
+            )
+
+        assert result is not None
+        assert result.input_tokens == 0
+        assert result.output_tokens == 0
+        assert result.cache_creation_tokens == 0
+        assert result.cache_read_tokens == 0
+
 
 class TestFormatDurationMs:
     """Tests for the _format_duration_ms helper method."""

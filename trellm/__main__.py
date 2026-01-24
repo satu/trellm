@@ -264,6 +264,10 @@ async def process_cards(
                     api_duration=result.cost_info.api_duration,
                     wall_duration=result.cost_info.wall_duration,
                     code_changes=result.cost_info.code_changes,
+                    input_tokens=result.cost_info.input_tokens,
+                    output_tokens=result.cost_info.output_tokens,
+                    cache_creation_tokens=result.cost_info.cache_creation_tokens,
+                    cache_read_tokens=result.cost_info.cache_read_tokens,
                 )
 
             # Mark as processed and move card
@@ -332,6 +336,10 @@ async def process_card_for_project(
                     api_duration=result.cost_info.api_duration,
                     wall_duration=result.cost_info.wall_duration,
                     code_changes=result.cost_info.code_changes,
+                    input_tokens=result.cost_info.input_tokens,
+                    output_tokens=result.cost_info.output_tokens,
+                    cache_creation_tokens=result.cost_info.cache_creation_tokens,
+                    cache_read_tokens=result.cost_info.cache_read_tokens,
                 )
 
             # Mark as processed and move card

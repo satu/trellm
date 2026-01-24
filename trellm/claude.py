@@ -38,6 +38,11 @@ class CostInfo:
     wall_duration: Optional[str] = None
     code_changes: Optional[str] = None
     raw_output: Optional[str] = None
+    # Token usage statistics
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_creation_tokens: int = 0
+    cache_read_tokens: int = 0
 
 
 @dataclass
@@ -357,6 +362,17 @@ class ClaudeRunner:
                             wall_ms = data["duration_ms"]
                             cost_info.wall_duration = self._format_duration_ms(wall_ms)
                         # Note: code_changes is not available in /cost JSON output
+
+                        # Extract token usage from usage field
+                        usage = data.get("usage", {})
+                        cost_info.input_tokens = usage.get("input_tokens", 0)
+                        cost_info.output_tokens = usage.get("output_tokens", 0)
+                        cost_info.cache_creation_tokens = usage.get(
+                            "cache_creation_input_tokens", 0
+                        )
+                        cost_info.cache_read_tokens = usage.get(
+                            "cache_read_input_tokens", 0
+                        )
                         break  # Found our JSON line, no need to continue
                     except json.JSONDecodeError:
                         continue
