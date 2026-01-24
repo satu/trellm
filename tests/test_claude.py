@@ -1,6 +1,7 @@
 """Tests for claude module."""
 
 import asyncio
+import json
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -738,14 +739,25 @@ class TestClaudeRunnerCost:
 
     @pytest.mark.asyncio
     async def test_run_cost_success(self, runner):
-        """Test successful /cost execution."""
-        cost_output = "Total cost:            $0.55\\nTotal duration (API):  6m 19.7s\\nTotal duration (wall): 6h 33m 10.2s\\nTotal code changes:    150 lines added, 20 lines removed"
+        """Test successful /cost execution with JSON format."""
+        # The actual JSON format from Claude Code /cost command
+        json_output = {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "duration_ms": 81,
+            "duration_api_ms": 379700,  # ~6m 19.7s
+            "num_turns": 36,
+            "result": "",
+            "session_id": "test-session",
+            "total_cost_usd": 0.55,
+        }
 
         mock_proc = AsyncMock()
         mock_proc.returncode = 0
         mock_proc.communicate = AsyncMock(
             return_value=(
-                f'{{"type":"result","result":"{cost_output}"}}\n'.encode(),
+                (json.dumps(json_output) + "\n").encode(),
                 b"",
             )
         )
@@ -758,10 +770,42 @@ class TestClaudeRunnerCost:
             )
 
         assert result is not None
-        assert result.total_cost == "$0.55"
+        assert result.total_cost == "$0.5500"
         assert result.api_duration == "6m 19.7s"
-        assert result.wall_duration == "6h 33m 10.2s"
-        assert result.code_changes == "150 lines added, 20 lines removed"
+        assert result.wall_duration == "81ms"
+        # code_changes is not available in JSON format
+        assert result.code_changes is None
+
+    @pytest.mark.asyncio
+    async def test_run_cost_large_values(self, runner):
+        """Test /cost with larger duration values."""
+        json_output = {
+            "type": "result",
+            "duration_ms": 3600000,  # 1 hour
+            "duration_api_ms": 7200000,  # 2 hours
+            "total_cost_usd": 1.2345,
+        }
+
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate = AsyncMock(
+            return_value=(
+                (json.dumps(json_output) + "\n").encode(),
+                b"",
+            )
+        )
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            result = await runner._run_cost(
+                session_id="test-session",
+                working_dir="/tmp/test",
+                prefix="[test] ",
+            )
+
+        assert result is not None
+        assert result.total_cost == "$1.2345"
+        assert result.api_duration == "2h 0m"
+        assert result.wall_duration == "1h 0m"
 
     @pytest.mark.asyncio
     async def test_run_cost_timeout(self, runner):
@@ -796,6 +840,46 @@ class TestClaudeRunnerCost:
             )
 
         assert result is None
+
+
+class TestFormatDurationMs:
+    """Tests for the _format_duration_ms helper method."""
+
+    @pytest.fixture
+    def runner(self):
+        """Create a ClaudeRunner instance."""
+        config = ClaudeConfig(
+            binary="claude",
+            timeout=60,
+            yolo=True,
+            projects={},
+        )
+        return ClaudeRunner(config)
+
+    def test_format_milliseconds(self, runner):
+        """Test formatting for sub-second durations."""
+        assert runner._format_duration_ms(500) == "500ms"
+        assert runner._format_duration_ms(1) == "1ms"
+        assert runner._format_duration_ms(999) == "999ms"
+
+    def test_format_seconds(self, runner):
+        """Test formatting for second-range durations."""
+        assert runner._format_duration_ms(1000) == "1.0s"
+        assert runner._format_duration_ms(1500) == "1.5s"
+        assert runner._format_duration_ms(59000) == "59.0s"
+
+    def test_format_minutes(self, runner):
+        """Test formatting for minute-range durations."""
+        assert runner._format_duration_ms(60000) == "1m 0.0s"
+        assert runner._format_duration_ms(90000) == "1m 30.0s"
+        assert runner._format_duration_ms(379700) == "6m 19.7s"
+        assert runner._format_duration_ms(3599000) == "59m 59.0s"
+
+    def test_format_hours(self, runner):
+        """Test formatting for hour-range durations."""
+        assert runner._format_duration_ms(3600000) == "1h 0m"
+        assert runner._format_duration_ms(5400000) == "1h 30m"
+        assert runner._format_duration_ms(7200000) == "2h 0m"
 
 
 class TestClaudeRunnerPreCompaction:

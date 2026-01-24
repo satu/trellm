@@ -274,6 +274,22 @@ class ClaudeRunner:
             logger.warning("%s/compact failed: %s", prefix, e)
             return None
 
+    @staticmethod
+    def _format_duration_ms(ms: int) -> str:
+        """Format milliseconds into a human-readable duration string."""
+        if ms < 1000:
+            return f"{ms}ms"
+        seconds = ms / 1000
+        if seconds < 60:
+            return f"{seconds:.1f}s"
+        minutes = seconds / 60
+        if minutes < 60:
+            secs = seconds % 60
+            return f"{int(minutes)}m {secs:.1f}s"
+        hours = minutes / 60
+        mins = int(minutes % 60)
+        return f"{int(hours)}h {mins}m"
+
     async def _run_cost(
         self,
         session_id: str,
@@ -322,7 +338,7 @@ class ClaudeRunner:
             output = stdout.decode()
 
             # Parse the result to extract cost info
-            # The /cost output is typically in the result field as formatted text
+            # The JSON output has fields directly: total_cost_usd, duration_ms, duration_api_ms
             cost_info = CostInfo(raw_output=output)
 
             for line in output.strip().split("\n"):
@@ -330,19 +346,18 @@ class ClaudeRunner:
                 if line.startswith("{"):
                     try:
                         data = json.loads(line)
-                        if "result" in data:
-                            result_text = data["result"]
-                            # Parse the formatted cost output
-                            for result_line in result_text.split("\n"):
-                                result_line = result_line.strip()
-                                if result_line.startswith("Total cost:"):
-                                    cost_info.total_cost = result_line.split(":", 1)[1].strip()
-                                elif result_line.startswith("Total duration (API):"):
-                                    cost_info.api_duration = result_line.split(":", 1)[1].strip()
-                                elif result_line.startswith("Total duration (wall):"):
-                                    cost_info.wall_duration = result_line.split(":", 1)[1].strip()
-                                elif result_line.startswith("Total code changes:"):
-                                    cost_info.code_changes = result_line.split(":", 1)[1].strip()
+                        # Extract cost directly from JSON fields
+                        if "total_cost_usd" in data:
+                            cost_usd = data["total_cost_usd"]
+                            cost_info.total_cost = f"${cost_usd:.4f}"
+                        if "duration_api_ms" in data:
+                            api_ms = data["duration_api_ms"]
+                            cost_info.api_duration = self._format_duration_ms(api_ms)
+                        if "duration_ms" in data:
+                            wall_ms = data["duration_ms"]
+                            cost_info.wall_duration = self._format_duration_ms(wall_ms)
+                        # Note: code_changes is not available in /cost JSON output
+                        break  # Found our JSON line, no need to continue
                     except json.JSONDecodeError:
                         continue
 
@@ -435,12 +450,11 @@ class ClaudeRunner:
                     result.cost_info = cost_info
                     if cost_info:
                         logger.info(
-                            "%sSession cost: %s | API duration: %s | Wall duration: %s | Changes: %s",
+                            "%sSession cost: %s | API duration: %s | Wall duration: %s",
                             prefix,
                             cost_info.total_cost or "N/A",
                             cost_info.api_duration or "N/A",
                             cost_info.wall_duration or "N/A",
-                            cost_info.code_changes or "N/A",
                         )
 
                 return result

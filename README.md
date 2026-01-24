@@ -93,7 +93,7 @@ TreLLM automatically manages token usage to prevent context exhaustion:
 ### Cost Reporting
 After each task, TreLLM logs session usage:
 ```
-[project] Session cost: $0.55 | API duration: 6m 19.7s | Wall duration: 30m | Changes: 150 lines added, 20 lines removed
+[project] Session cost: $0.5500 | API duration: 6m 19.7s | Wall duration: 30m 0.0s
 ```
 
 ### Error Handling
