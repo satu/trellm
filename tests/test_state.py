@@ -372,12 +372,12 @@ class TestStateManagerStats:
         assert stats.average_cost_cents == 0
 
     def test_ticket_history_limit(self, tmp_path):
-        """Test that ticket history is limited to 1000 entries."""
+        """Test that ticket history is limited to 100 entries."""
         state_file = tmp_path / "state.json"
         manager = StateManager(str(state_file))
 
-        # Add 1005 tickets
-        for i in range(1005):
+        # Add 105 tickets
+        for i in range(105):
             manager.record_cost(
                 card_id=f"card{i}",
                 project="proj",
@@ -385,10 +385,10 @@ class TestStateManagerStats:
             )
 
         # Check history is trimmed
-        assert len(manager.state["stats"]["ticket_history"]) == 1000
-        # Verify oldest entries were removed (last 1000 remain)
+        assert len(manager.state["stats"]["ticket_history"]) == 100
+        # Verify oldest entries were removed (last 100 remain)
         assert manager.state["stats"]["ticket_history"][0]["card_id"] == "card5"
-        assert manager.state["stats"]["ticket_history"][-1]["card_id"] == "card1004"
+        assert manager.state["stats"]["ticket_history"][-1]["card_id"] == "card104"
 
     def test_get_stats_nonexistent_project(self, tmp_path):
         """Test getting stats for a project that doesn't exist."""
@@ -398,3 +398,232 @@ class TestStateManagerStats:
         stats = manager.get_stats("nonexistent")
         assert stats.total_cost_cents == 0
         assert stats.total_tickets == 0
+
+
+class TestStatsRollup:
+    """Tests for RRDTool-style date rollup functionality."""
+
+    def test_daily_entries_within_30_days_preserved(self, tmp_path):
+        """Test that daily entries within 30 days are not rolled up."""
+        from datetime import datetime, timezone
+
+        state_file = tmp_path / "state.json"
+        manager = StateManager(str(state_file))
+
+        # Add entries for the last 30 days
+        today = datetime.now(timezone.utc).date()
+        for i in range(30):
+            date_key = (today - __import__("datetime").timedelta(days=i)).strftime("%Y-%m-%d")
+            manager.state["stats"]["by_date"][date_key] = {
+                "total_cost_cents": 100,
+                "total_tickets": 1,
+                "total_api_duration_seconds": 60,
+                "total_wall_duration_seconds": 120,
+                "total_lines_added": 10,
+                "total_lines_removed": 5,
+            }
+
+        manager._save()
+
+        # All 30 daily entries should still exist
+        by_date = manager.state["stats"]["by_date"]
+        daily_keys = [k for k in by_date.keys() if not k.startswith("week-") and not k.startswith("month-")]
+        assert len(daily_keys) == 30
+
+    def test_entries_31_to_90_days_rolled_to_weekly(self, tmp_path):
+        """Test that entries 31-90 days old are rolled into weekly buckets."""
+        from datetime import datetime, timezone, timedelta
+
+        state_file = tmp_path / "state.json"
+        manager = StateManager(str(state_file))
+
+        # Add entries for days 31-60 (should be rolled to weekly)
+        today = datetime.now(timezone.utc).date()
+        for i in range(31, 61):
+            date_key = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+            manager.state["stats"]["by_date"][date_key] = {
+                "total_cost_cents": 100,
+                "total_tickets": 1,
+                "total_api_duration_seconds": 60,
+                "total_wall_duration_seconds": 120,
+                "total_lines_added": 10,
+                "total_lines_removed": 5,
+            }
+
+        manager._save()
+
+        # Old daily entries should be gone
+        by_date = manager.state["stats"]["by_date"]
+        daily_keys = [k for k in by_date.keys() if not k.startswith("week-") and not k.startswith("month-")]
+        assert len(daily_keys) == 0
+
+        # Weekly buckets should exist
+        weekly_keys = [k for k in by_date.keys() if k.startswith("week-")]
+        assert len(weekly_keys) > 0
+
+    def test_entries_over_90_days_rolled_to_monthly(self, tmp_path):
+        """Test that entries over 90 days old are rolled into monthly buckets."""
+        from datetime import datetime, timezone, timedelta
+
+        state_file = tmp_path / "state.json"
+        manager = StateManager(str(state_file))
+
+        # Add entries for days 91-120 (should be rolled to monthly)
+        today = datetime.now(timezone.utc).date()
+        for i in range(91, 121):
+            date_key = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+            manager.state["stats"]["by_date"][date_key] = {
+                "total_cost_cents": 100,
+                "total_tickets": 1,
+                "total_api_duration_seconds": 60,
+                "total_wall_duration_seconds": 120,
+                "total_lines_added": 10,
+                "total_lines_removed": 5,
+            }
+
+        manager._save()
+
+        # Old daily entries should be gone
+        by_date = manager.state["stats"]["by_date"]
+        daily_keys = [k for k in by_date.keys() if not k.startswith("week-") and not k.startswith("month-")]
+        assert len(daily_keys) == 0
+
+        # Monthly buckets should exist
+        monthly_keys = [k for k in by_date.keys() if k.startswith("month-")]
+        assert len(monthly_keys) > 0
+
+    def test_rollup_preserves_totals(self, tmp_path):
+        """Test that rollup preserves the total values."""
+        from datetime import datetime, timezone, timedelta
+
+        state_file = tmp_path / "state.json"
+        manager = StateManager(str(state_file))
+
+        # Add 100 daily entries over 100 days
+        today = datetime.now(timezone.utc).date()
+        expected_cost = 0
+        expected_tickets = 0
+
+        for i in range(100):
+            date_key = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+            cost = 100 * (i + 1)  # Different cost for each day
+            manager.state["stats"]["by_date"][date_key] = {
+                "total_cost_cents": cost,
+                "total_tickets": 1,
+                "total_api_duration_seconds": 60,
+                "total_wall_duration_seconds": 120,
+                "total_lines_added": 10,
+                "total_lines_removed": 5,
+            }
+            expected_cost += cost
+            expected_tickets += 1
+
+        manager._save()
+
+        # Calculate totals from all buckets
+        by_date = manager.state["stats"]["by_date"]
+        actual_cost = sum(v.get("total_cost_cents", 0) for v in by_date.values())
+        actual_tickets = sum(v.get("total_tickets", 0) for v in by_date.values())
+
+        assert actual_cost == expected_cost
+        assert actual_tickets == expected_tickets
+
+    def test_rollup_weekly_to_monthly(self, tmp_path):
+        """Test that old weekly buckets are rolled into monthly buckets."""
+        from datetime import datetime, timezone, timedelta
+
+        state_file = tmp_path / "state.json"
+        manager = StateManager(str(state_file))
+
+        # Directly add an old weekly bucket (from 100 days ago)
+        today = datetime.now(timezone.utc).date()
+        old_date = today - timedelta(days=100)
+        year, week, _ = old_date.isocalendar()
+        weekly_key = f"week-{year}-{week:02d}"
+
+        manager.state["stats"]["by_date"][weekly_key] = {
+            "total_cost_cents": 500,
+            "total_tickets": 5,
+            "total_api_duration_seconds": 300,
+            "total_wall_duration_seconds": 600,
+            "total_lines_added": 50,
+            "total_lines_removed": 25,
+        }
+
+        manager._save()
+
+        # Weekly bucket should be rolled into monthly
+        by_date = manager.state["stats"]["by_date"]
+        assert weekly_key not in by_date
+
+        # Monthly bucket should exist with the values
+        monthly_keys = [k for k in by_date.keys() if k.startswith("month-")]
+        assert len(monthly_keys) > 0
+
+        # Verify values were preserved
+        total_cost = sum(v.get("total_cost_cents", 0) for v in by_date.values())
+        assert total_cost == 500
+
+    def test_empty_bucket_helper(self, tmp_path):
+        """Test _empty_bucket returns correct structure."""
+        state_file = tmp_path / "state.json"
+        manager = StateManager(str(state_file))
+
+        bucket = manager._empty_bucket()
+        assert bucket["total_cost_cents"] == 0
+        assert bucket["total_tickets"] == 0
+        assert bucket["total_api_duration_seconds"] == 0
+        assert bucket["total_wall_duration_seconds"] == 0
+        assert bucket["total_lines_added"] == 0
+        assert bucket["total_lines_removed"] == 0
+
+    def test_aggregate_into_bucket(self, tmp_path):
+        """Test _aggregate_into_bucket correctly aggregates."""
+        state_file = tmp_path / "state.json"
+        manager = StateManager(str(state_file))
+
+        bucket = manager._empty_bucket()
+        stats = {
+            "total_cost_cents": 100,
+            "total_tickets": 2,
+            "total_api_duration_seconds": 60,
+            "total_wall_duration_seconds": 120,
+            "total_lines_added": 50,
+            "total_lines_removed": 25,
+        }
+
+        manager._aggregate_into_bucket(bucket, stats)
+        manager._aggregate_into_bucket(bucket, stats)
+
+        assert bucket["total_cost_cents"] == 200
+        assert bucket["total_tickets"] == 4
+        assert bucket["total_api_duration_seconds"] == 120
+        assert bucket["total_wall_duration_seconds"] == 240
+        assert bucket["total_lines_added"] == 100
+        assert bucket["total_lines_removed"] == 50
+
+    def test_rollup_no_effect_on_recent_data(self, tmp_path):
+        """Test that rollup doesn't affect data within 30 days."""
+        from datetime import datetime, timezone, timedelta
+
+        state_file = tmp_path / "state.json"
+        manager = StateManager(str(state_file))
+
+        # Add a single recent entry
+        today = datetime.now(timezone.utc).date()
+        yesterday = (today - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        manager.state["stats"]["by_date"][yesterday] = {
+            "total_cost_cents": 100,
+            "total_tickets": 1,
+            "total_api_duration_seconds": 60,
+            "total_wall_duration_seconds": 120,
+            "total_lines_added": 10,
+            "total_lines_removed": 5,
+        }
+
+        manager._save()
+
+        # Entry should still exist unchanged
+        assert yesterday in manager.state["stats"]["by_date"]
+        assert manager.state["stats"]["by_date"][yesterday]["total_cost_cents"] == 100

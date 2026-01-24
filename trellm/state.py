@@ -3,8 +3,8 @@
 import json
 import logging
 import re
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -117,9 +117,135 @@ class StateManager:
         }
 
     def _save(self) -> None:
-        """Save state to file."""
+        """Save state to file, running rollup to keep data compact."""
+        self._rollup_old_dates()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(self.state, indent=2))
+
+    def _rollup_old_dates(self) -> None:
+        """Roll up old date entries to reduce storage size.
+
+        RRDTool-style compaction strategy:
+        - Days 1-30: Keep daily granularity
+        - Days 31-90: Aggregate into weekly buckets (week-YYYY-WW)
+        - Days 91+: Aggregate into monthly buckets (month-YYYY-MM)
+        """
+        if "stats" not in self.state or "by_date" not in self.state["stats"]:
+            return
+
+        by_date = self.state["stats"]["by_date"]
+        today = datetime.now(timezone.utc).date()
+
+        # Separate entries into daily, weekly, and monthly
+        to_remove: list[str] = []
+        weekly_buckets: dict[str, dict] = {}
+        monthly_buckets: dict[str, dict] = {}
+
+        for date_key, stats in list(by_date.items()):
+            # Skip already-rolled-up entries (week-* and month-*)
+            if date_key.startswith("week-") or date_key.startswith("month-"):
+                continue
+
+            try:
+                entry_date = datetime.strptime(date_key, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+
+            days_old = (today - entry_date).days
+
+            if days_old <= 30:
+                # Keep daily entries for last 30 days
+                continue
+            elif days_old <= 90:
+                # Aggregate into weekly buckets
+                # Use ISO week number for consistent week boundaries
+                year, week, _ = entry_date.isocalendar()
+                bucket_key = f"week-{year}-{week:02d}"
+
+                if bucket_key not in weekly_buckets:
+                    weekly_buckets[bucket_key] = self._empty_bucket()
+
+                self._aggregate_into_bucket(weekly_buckets[bucket_key], stats)
+                to_remove.append(date_key)
+            else:
+                # Aggregate into monthly buckets
+                bucket_key = f"month-{entry_date.year}-{entry_date.month:02d}"
+
+                if bucket_key not in monthly_buckets:
+                    monthly_buckets[bucket_key] = self._empty_bucket()
+
+                self._aggregate_into_bucket(monthly_buckets[bucket_key], stats)
+                to_remove.append(date_key)
+
+        # Also roll up old weekly buckets into monthly
+        for date_key, stats in list(by_date.items()):
+            if not date_key.startswith("week-"):
+                continue
+
+            # Parse week-YYYY-WW
+            try:
+                parts = date_key.split("-")
+                year = int(parts[1])
+                week = int(parts[2])
+                # Get first day of that ISO week
+                week_start = datetime.strptime(f"{year}-W{week:02d}-1", "%Y-W%W-%w").date()
+            except (ValueError, IndexError):
+                continue
+
+            days_old = (today - week_start).days
+
+            if days_old > 90:
+                # Roll weekly into monthly
+                bucket_key = f"month-{week_start.year}-{week_start.month:02d}"
+
+                if bucket_key not in monthly_buckets:
+                    monthly_buckets[bucket_key] = self._empty_bucket()
+
+                self._aggregate_into_bucket(monthly_buckets[bucket_key], stats)
+                to_remove.append(date_key)
+
+        # Apply changes
+        for key in to_remove:
+            if key in by_date:
+                del by_date[key]
+
+        # Add new weekly and monthly buckets
+        for bucket_key, bucket_stats in weekly_buckets.items():
+            if bucket_key in by_date:
+                # Merge with existing
+                self._aggregate_into_bucket(by_date[bucket_key], bucket_stats)
+            else:
+                by_date[bucket_key] = bucket_stats
+
+        for bucket_key, bucket_stats in monthly_buckets.items():
+            if bucket_key in by_date:
+                # Merge with existing
+                self._aggregate_into_bucket(by_date[bucket_key], bucket_stats)
+            else:
+                by_date[bucket_key] = bucket_stats
+
+        if to_remove:
+            logger.debug("Rolled up %d old date entries", len(to_remove))
+
+    def _empty_bucket(self) -> dict:
+        """Return an empty stats bucket."""
+        return {
+            "total_cost_cents": 0,
+            "total_tickets": 0,
+            "total_api_duration_seconds": 0,
+            "total_wall_duration_seconds": 0,
+            "total_lines_added": 0,
+            "total_lines_removed": 0,
+        }
+
+    def _aggregate_into_bucket(self, bucket: dict, stats: dict) -> None:
+        """Aggregate stats into a bucket."""
+        bucket["total_cost_cents"] += stats.get("total_cost_cents", 0)
+        bucket["total_tickets"] += stats.get("total_tickets", 0)
+        bucket["total_api_duration_seconds"] += stats.get("total_api_duration_seconds", 0)
+        bucket["total_wall_duration_seconds"] += stats.get("total_wall_duration_seconds", 0)
+        bucket["total_lines_added"] += stats.get("total_lines_added", 0)
+        bucket["total_lines_removed"] += stats.get("total_lines_removed", 0)
 
     def get_session(self, project: str) -> Optional[str]:
         """Get session ID for a project."""
@@ -320,9 +446,9 @@ class StateManager:
         }
         stats["ticket_history"].append(ticket_record)
 
-        # Keep only last 1000 tickets in history to prevent unbounded growth
-        if len(stats["ticket_history"]) > 1000:
-            stats["ticket_history"] = stats["ticket_history"][-1000:]
+        # Keep only last 100 tickets in history to prevent unbounded growth
+        if len(stats["ticket_history"]) > 100:
+            stats["ticket_history"] = stats["ticket_history"][-100:]
 
         logger.info(
             "Recorded stats for card %s: cost=%s, api=%s, wall=%s, changes=%s",
@@ -386,7 +512,6 @@ class StateManager:
         result = AggregatedStats()
         today = datetime.now(timezone.utc)
 
-        from datetime import timedelta
         for i in range(days):
             date = (today - timedelta(days=i)).strftime("%Y-%m-%d")
             date_stats = self.state["stats"].get("by_date", {}).get(date, {})
