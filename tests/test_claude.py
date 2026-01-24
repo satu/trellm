@@ -446,11 +446,12 @@ class TestClaudeRunnerCompact:
         )
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
-            result = await runner._run_compact(
-                session_id="old-session-456",
-                working_dir="/tmp/test",
-                prefix="[test] ",
-            )
+            with patch.object(runner, "_run_cost", return_value=None):
+                result = await runner._run_compact(
+                    session_id="old-session-456",
+                    working_dir="/tmp/test",
+                    prefix="[test] ",
+                )
 
         assert result == "new-session-123"
 
@@ -464,11 +465,12 @@ class TestClaudeRunnerCompact:
         )
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
-            result = await runner._run_compact(
-                session_id="old-session-456",
-                working_dir="/tmp/test",
-                prefix="[test] ",
-            )
+            with patch.object(runner, "_run_cost", return_value=None):
+                result = await runner._run_compact(
+                    session_id="old-session-456",
+                    working_dir="/tmp/test",
+                    prefix="[test] ",
+                )
 
         assert result is None
 
@@ -481,11 +483,12 @@ class TestClaudeRunnerCompact:
         )
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
-            result = await runner._run_compact(
-                session_id="old-session-456",
-                working_dir="/tmp/test",
-                prefix="[test] ",
-            )
+            with patch.object(runner, "_run_cost", return_value=None):
+                result = await runner._run_compact(
+                    session_id="old-session-456",
+                    working_dir="/tmp/test",
+                    prefix="[test] ",
+                )
 
         assert result is None
 
@@ -502,12 +505,13 @@ class TestClaudeRunnerCompact:
         )
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
-            result = await runner._run_compact(
-                session_id="old-session-456",
-                working_dir="/tmp/test",
-                prefix="[test] ",
-                compact_prompt="Preserve API patterns and test conventions",
-            )
+            with patch.object(runner, "_run_cost", return_value=None):
+                result = await runner._run_compact(
+                    session_id="old-session-456",
+                    working_dir="/tmp/test",
+                    prefix="[test] ",
+                    compact_prompt="Preserve API patterns and test conventions",
+                )
 
         assert result == "new-session-123"
         # Verify the prompt was passed correctly
@@ -520,6 +524,114 @@ class TestClaudeRunnerCompact:
                 break
         else:
             pytest.fail("Could not find -p argument in command")
+
+    @pytest.mark.asyncio
+    async def test_run_compact_logs_token_counts(self, runner, caplog):
+        """Test that /compact logs token counts before and after."""
+        import logging
+        caplog.set_level(logging.INFO)
+
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate = AsyncMock(
+            return_value=(
+                b'{"type":"result","session_id":"new-session-123"}\n',
+                b"",
+            )
+        )
+
+        # Mock cost info before and after compaction
+        before_cost = CostInfo(
+            input_tokens=100000,
+            output_tokens=20000,
+            cache_creation_tokens=5000,
+            cache_read_tokens=10000,
+        )
+        after_cost = CostInfo(
+            input_tokens=30000,
+            output_tokens=5000,
+            cache_creation_tokens=1000,
+            cache_read_tokens=2000,
+        )
+
+        call_count = 0
+
+        async def mock_run_cost(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return before_cost  # Before compaction
+            return after_cost  # After compaction
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            with patch.object(runner, "_run_cost", side_effect=mock_run_cost):
+                result = await runner._run_compact(
+                    session_id="old-session-456",
+                    working_dir="/tmp/test",
+                    prefix="[test] ",
+                )
+
+        assert result == "new-session-123"
+
+        # Check that logs contain token information
+        log_messages = [r.message for r in caplog.records]
+        # Before compaction log
+        before_log = [m for m in log_messages if "Tokens before compaction" in m]
+        assert len(before_log) == 1
+        assert "125000" in before_log[0]  # 100000 + 20000 + 5000
+        # After compaction log with reduction
+        after_log = [m for m in log_messages if "/compact successful" in m and "reduction" in m]
+        assert len(after_log) == 1
+        assert "125000 -> 36000" in after_log[0]  # Before -> After
+        assert "89000" in after_log[0]  # Reduction amount
+        assert "71.2%" in after_log[0]  # Reduction percentage
+
+    @pytest.mark.asyncio
+    async def test_run_compact_logs_only_after_when_before_fails(self, runner, caplog):
+        """Test that /compact logs after tokens even when before tokens fail."""
+        import logging
+        caplog.set_level(logging.INFO)
+
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate = AsyncMock(
+            return_value=(
+                b'{"type":"result","session_id":"new-session-123"}\n',
+                b"",
+            )
+        )
+
+        after_cost = CostInfo(
+            input_tokens=30000,
+            output_tokens=5000,
+            cache_creation_tokens=1000,
+            cache_read_tokens=2000,
+        )
+
+        call_count = 0
+
+        async def mock_run_cost(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return None  # Before compaction fails
+            return after_cost  # After compaction
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            with patch.object(runner, "_run_cost", side_effect=mock_run_cost):
+                result = await runner._run_compact(
+                    session_id="old-session-456",
+                    working_dir="/tmp/test",
+                    prefix="[test] ",
+                )
+
+        assert result == "new-session-123"
+
+        # Check that logs contain after-compaction token information
+        log_messages = [r.message for r in caplog.records]
+        after_log = [m for m in log_messages if "/compact successful" in m and "tokens after" in m]
+        assert len(after_log) == 1
+        assert "36000" in after_log[0]  # Total after tokens
 
 
 class TestClaudeRunnerRetryLogic:

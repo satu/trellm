@@ -355,6 +355,28 @@ class ClaudeRunner:
         Returns:
             New session ID if successful, None otherwise
         """
+        # Get token counts before compaction
+        before_cost = await self._run_cost(
+            session_id=session_id,
+            working_dir=working_dir,
+            prefix=prefix,
+        )
+        before_tokens = 0
+        if before_cost:
+            before_tokens = (
+                before_cost.input_tokens
+                + before_cost.output_tokens
+                + before_cost.cache_creation_tokens
+            )
+            logger.info(
+                "%sTokens before compaction: %d (input: %d, output: %d, cache_creation: %d)",
+                prefix,
+                before_tokens,
+                before_cost.input_tokens,
+                before_cost.output_tokens,
+                before_cost.cache_creation_tokens,
+            )
+
         # Build compact command with optional custom instructions
         compact_cmd = "/compact"
         if compact_prompt:
@@ -403,23 +425,67 @@ class ClaudeRunner:
 
             # Parse output to get new session ID
             output = stdout.decode()
+            new_session_id = None
             for line in reversed(output.strip().split("\n")):
                 line = line.strip()
                 if line.startswith("{"):
                     try:
                         data = json.loads(line)
                         if "session_id" in data:
-                            logger.info(
-                                "%s/compact successful, new session: %s",
-                                prefix,
-                                data["session_id"],
-                            )
-                            return data["session_id"]
+                            new_session_id = data["session_id"]
+                            break
                     except json.JSONDecodeError:
                         continue
 
-            logger.warning("%s/compact completed but no session ID found", prefix)
-            return None
+            if not new_session_id:
+                logger.warning("%s/compact completed but no session ID found", prefix)
+                return None
+
+            # Get token counts after compaction
+            after_cost = await self._run_cost(
+                session_id=new_session_id,
+                working_dir=working_dir,
+                prefix=prefix,
+            )
+            after_tokens = 0
+            if after_cost:
+                after_tokens = (
+                    after_cost.input_tokens
+                    + after_cost.output_tokens
+                    + after_cost.cache_creation_tokens
+                )
+
+            # Log compaction results with token comparison
+            if before_tokens > 0 and after_tokens > 0:
+                reduction = before_tokens - after_tokens
+                reduction_pct = (reduction / before_tokens) * 100 if before_tokens > 0 else 0
+                logger.info(
+                    "%s/compact successful: %d -> %d tokens (-%d, %.1f%% reduction), new session: %s",
+                    prefix,
+                    before_tokens,
+                    after_tokens,
+                    reduction,
+                    reduction_pct,
+                    new_session_id,
+                )
+            elif after_cost:
+                logger.info(
+                    "%s/compact successful: tokens after: %d (input: %d, output: %d, cache_creation: %d), new session: %s",
+                    prefix,
+                    after_tokens,
+                    after_cost.input_tokens,
+                    after_cost.output_tokens,
+                    after_cost.cache_creation_tokens,
+                    new_session_id,
+                )
+            else:
+                logger.info(
+                    "%s/compact successful, new session: %s",
+                    prefix,
+                    new_session_id,
+                )
+
+            return new_session_id
 
         except asyncio.TimeoutError:
             logger.warning("%s/compact timed out", prefix)
