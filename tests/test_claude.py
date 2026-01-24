@@ -90,6 +90,26 @@ class TestClaudeRunner:
         assert "abc123" in prompt
         assert "Description:" not in prompt
 
+    def test_build_prompt_includes_github_commit_link_requirement(self):
+        """Test that prompt requires GitHub links for commit mentions."""
+        config = ClaudeConfig()
+        runner = ClaudeRunner(config)
+
+        card = TrelloCard(
+            id="abc123",
+            name="test card",
+            description="",
+            url="https://trello.com/c/abc123",
+            last_activity="2026-01-08T12:00:00Z",
+        )
+
+        prompt = runner._build_prompt(card)
+
+        # Should include requirement for GitHub commit links
+        assert "commit hash" in prompt or "commit SHA" in prompt
+        assert "GitHub link" in prompt
+        assert "git remote get-url origin" in prompt
+
     def test_parse_output_with_session_id(self):
         """Test parsing output with session ID."""
         config = ClaudeConfig()

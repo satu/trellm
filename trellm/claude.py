@@ -811,6 +811,7 @@ Important guidelines:
 - Commit with a clear, descriptive message
 - Push your changes to the remote repository
 - When done, add a comment starting with "Claude:" summarizing what was done
+- IMPORTANT: Whenever you mention a commit hash/SHA in comments or summaries, always include a clickable GitHub link to the commit (e.g., https://github.com/owner/repo/commit/<sha>). Use `git remote get-url origin` to determine the repository URL if needed.
 {move_instruction}
 
 Voice note handling:
