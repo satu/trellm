@@ -41,6 +41,59 @@ def parse_project(card_name: str) -> str:
     return parts[0].rstrip(":").lower()
 
 
+def is_stats_command(card_name: str) -> bool:
+    """Check if a card is a /stats command.
+
+    Supports:
+    - "project /stats"
+    - "project: /stats"
+    - "/stats" (global stats)
+    """
+    lower_name = card_name.lower()
+    # Check if the card name contains /stats
+    return "/stats" in lower_name
+
+
+async def handle_stats_command(
+    card: TrelloCard,
+    trello: TrelloClient,
+    state: StateManager,
+    ready_list_id: Optional[str] = None,
+) -> bool:
+    """Handle a /stats command card.
+
+    Posts stats as a comment on the card and moves it to READY TO TRY.
+
+    Args:
+        card: The Trello card with the /stats command
+        trello: Trello client for API calls
+        state: State manager for stats data
+        ready_list_id: Optional list ID to move to (defaults to READY TO TRY)
+
+    Returns:
+        True if handled successfully, False otherwise.
+    """
+    project = parse_project(card.name)
+
+    try:
+        # Generate stats report
+        stats_report = state.format_stats_report(project if project != "unknown" else None)
+
+        # Add comment with stats
+        comment = f"Claude: /stats command processed\n\n{stats_report}"
+        await trello.add_comment(card.id, comment)
+
+        # Move card to ready
+        await trello.move_to_ready(card.id)
+
+        logger.info("Handled /stats command for card %s", card.id)
+        return True
+
+    except Exception as e:
+        logger.error("Failed to handle /stats command for card %s: %s", card.id, e)
+        return False
+
+
 def compare_configs(old: Config, new: Config) -> list[str]:
     """Compare two configs and return a list of changes.
 
@@ -133,6 +186,20 @@ async def process_cards(
             else:
                 continue
 
+        # Check for /stats command - handle directly without Claude
+        if is_stats_command(card.name):
+            logger.info("Detected /stats command: %s", card.name)
+            success = await handle_stats_command(
+                card=card,
+                trello=trello,
+                state=state,
+                ready_list_id=config.trello.ready_to_try_list_id,
+            )
+            if success:
+                state.mark_processed(card.id)
+                processed_count += 1
+            continue
+
         project = parse_project(card.name)
 
         # Skip cards for unrecognized projects
@@ -168,6 +235,17 @@ async def process_cards(
             # Update session ID and last card ID for next task
             if result.session_id:
                 state.set_session(project, result.session_id, last_card_id=card.id)
+
+            # Record cost/usage statistics
+            if result.cost_info:
+                state.record_cost(
+                    card_id=card.id,
+                    project=project,
+                    total_cost=result.cost_info.total_cost,
+                    api_duration=result.cost_info.api_duration,
+                    wall_duration=result.cost_info.wall_duration,
+                    code_changes=result.cost_info.code_changes,
+                )
 
             # Mark as processed and move card
             state.mark_processed(card.id)
@@ -225,6 +303,17 @@ async def process_card_for_project(
             # Update session ID and last card ID for next task
             if result.session_id:
                 state.set_session(project, result.session_id, last_card_id=card.id)
+
+            # Record cost/usage statistics
+            if result.cost_info:
+                state.record_cost(
+                    card_id=card.id,
+                    project=project,
+                    total_cost=result.cost_info.total_cost,
+                    api_duration=result.cost_info.api_duration,
+                    wall_duration=result.cost_info.wall_duration,
+                    code_changes=result.cost_info.code_changes,
+                )
 
             # Mark as processed and move card
             state.mark_processed(card.id)
@@ -337,6 +426,21 @@ async def run_polling_loop(
                             state.clear_processed(card.id)
                         else:
                             continue
+
+                    # Check for /stats command - handle directly without Claude
+                    if is_stats_command(card.name):
+                        logger.info("Detected /stats command: %s", card.name)
+                        _processing_cards.add(card.id)
+                        success = await handle_stats_command(
+                            card=card,
+                            trello=trello,
+                            state=state,
+                            ready_list_id=current_config.trello.ready_to_try_list_id,
+                        )
+                        if success:
+                            state.mark_processed(card.id)
+                        _processing_cards.discard(card.id)
+                        continue
 
                     project = parse_project(card.name)
 
