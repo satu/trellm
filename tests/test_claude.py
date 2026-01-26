@@ -1748,3 +1748,5 @@ class TestFetchClaudeUsageLimits:
 
         assert result.error is not None
         assert "expired" in result.error or "invalid" in result.error
+        # Should include guidance on how to fix
+        assert "claude" in result.error.lower()

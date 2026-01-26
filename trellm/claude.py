@@ -166,7 +166,10 @@ def fetch_claude_usage_limits(
             data = json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         if e.code == 401:
-            return ClaudeUsageLimits(error="OAuth token expired or invalid")
+            return ClaudeUsageLimits(
+                error="OAuth token expired or invalid. "
+                "Try running `claude` in a terminal to refresh your login."
+            )
         return ClaudeUsageLimits(error=f"API error: {e.code}")
     except urllib.error.URLError as e:
         return ClaudeUsageLimits(error=f"Network error: {e.reason}")
