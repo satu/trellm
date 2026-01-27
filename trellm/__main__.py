@@ -73,6 +73,37 @@ def is_stats_command(card_name: str, valid_projects: set[str] | None = None) -> 
     return parts[1] == "/stats"
 
 
+def is_maintenance_command(card_name: str, valid_projects: set[str] | None = None) -> bool:
+    """Check if a card is a /maintenance command.
+
+    The /maintenance command must appear immediately after the project name:
+    - "project /maintenance" - valid
+    - "project: /maintenance" - valid
+    - "project problem with /maintenance" - NOT valid (maintenance appears later)
+
+    Args:
+        card_name: The card name to check
+        valid_projects: Optional set of valid project names. If provided,
+            only cards with a matching project name will be recognized.
+
+    Returns:
+        True if the card is a valid /maintenance command, False otherwise.
+    """
+    parts = card_name.lower().split()
+    if len(parts) < 2:
+        return False
+
+    # Extract project name (first word, strip colon)
+    project = parts[0].rstrip(":")
+
+    # Check if project is valid (if filter provided)
+    if valid_projects is not None and project not in valid_projects:
+        return False
+
+    # /maintenance must be the second word (immediately after project name)
+    return parts[1] == "/maintenance"
+
+
 async def handle_stats_command(
     card: TrelloCard,
     trello: TrelloClient,
@@ -117,6 +148,111 @@ async def handle_stats_command(
 
     except Exception as e:
         logger.error("Failed to handle /stats command for card %s: %s", card.id, e)
+        return False
+
+
+async def handle_maintenance_command(
+    card: TrelloCard,
+    trello: TrelloClient,
+    state: StateManager,
+    config: Config,
+) -> bool:
+    """Handle a /maintenance command card.
+
+    Runs maintenance for the specified project and posts results as a comment.
+
+    Args:
+        card: The Trello card with the /maintenance command
+        trello: Trello client for API calls
+        state: State manager for state data
+        config: Application configuration
+
+    Returns:
+        True if handled successfully, False otherwise.
+    """
+    project = parse_project(card.name)
+
+    # Validate project exists
+    if project not in config.claude.projects:
+        error_msg = f"Claude: /maintenance command failed\n\nProject '{project}' not found in configuration."
+        await trello.add_comment(card.id, error_msg)
+        await trello.move_to_ready(card.id)
+        logger.warning("Maintenance command for unknown project: %s", project)
+        return True  # Card handled, just with an error
+
+    # Get maintenance config
+    maintenance_config = config.get_maintenance_config(project)
+    if not maintenance_config:
+        error_msg = f"Claude: /maintenance command failed\n\nMaintenance is not configured for project '{project}'."
+        await trello.add_comment(card.id, error_msg)
+        await trello.move_to_ready(card.id)
+        logger.warning("Maintenance not configured for project: %s", project)
+        return True
+
+    try:
+        # Get session info
+        session_id = state.get_session(project)
+        if not session_id:
+            session_id = config.get_initial_session_id(project)
+
+        working_dir = config.get_working_dir(project)
+        if not working_dir:
+            error_msg = f"Claude: /maintenance command failed\n\nNo working directory configured for project '{project}'."
+            await trello.add_comment(card.id, error_msg)
+            await trello.move_to_ready(card.id)
+            return True
+
+        ticket_count = state.get_ticket_count(project)
+        last_maintenance = state.get_last_maintenance(project)
+
+        logger.info(
+            "[%s] Running manual maintenance (ticket_count=%d)",
+            project,
+            ticket_count,
+        )
+
+        # Run maintenance
+        result = await run_maintenance(
+            project=project,
+            working_dir=working_dir,
+            session_id=session_id,
+            claude_config=config.claude,
+            maintenance_config=maintenance_config,
+            ticket_count=ticket_count,
+            last_maintenance=last_maintenance,
+            trello_client=trello,
+            icebox_list_id=config.trello.icebox_list_id,
+        )
+
+        if result.success:
+            # Update state
+            state.set_last_maintenance(project)
+            state.reset_ticket_count(project)
+            if result.session_id:
+                state.set_session(project, result.session_id)
+
+            # Post success comment
+            comment = f"Claude: /maintenance command completed for {project}\n\n{result.summary}"
+            await trello.add_comment(card.id, comment)
+            logger.info("[%s] Manual maintenance completed", project)
+        else:
+            # Post failure comment
+            comment = f"Claude: /maintenance command failed for {project}\n\n{result.summary}"
+            await trello.add_comment(card.id, comment)
+            logger.error("[%s] Manual maintenance failed: %s", project, result.summary)
+
+        # Move card to ready
+        await trello.move_to_ready(card.id)
+        return True
+
+    except Exception as e:
+        logger.error("Failed to handle /maintenance command for card %s: %s", card.id, e)
+        try:
+            error_comment = f"Claude: /maintenance command failed\n\nError: {e}"
+            await trello.add_comment(card.id, error_comment)
+            await trello.move_to_ready(card.id)
+        except Exception:
+            pass
         return False
 
 
@@ -221,6 +357,21 @@ async def process_cards(
                 trello=trello,
                 state=state,
                 ready_list_id=config.trello.ready_to_try_list_id,
+            )
+            if success:
+                state.mark_processed(card.id)
+                processed_count += 1
+            continue
+
+        # Check for /maintenance command - handle directly without Claude
+        # Only recognize /maintenance for configured projects
+        if is_maintenance_command(card.name, set(config.claude.projects.keys())):
+            logger.info("Detected /maintenance command: %s", card.name)
+            success = await handle_maintenance_command(
+                card=card,
+                trello=trello,
+                state=state,
+                config=config,
             )
             if success:
                 state.mark_processed(card.id)
@@ -561,6 +712,22 @@ async def run_polling_loop(
                             trello=trello,
                             state=state,
                             ready_list_id=current_config.trello.ready_to_try_list_id,
+                        )
+                        if success:
+                            state.mark_processed(card.id)
+                        _processing_cards.discard(card.id)
+                        continue
+
+                    # Check for /maintenance command - handle directly without Claude
+                    # Only recognize /maintenance for configured projects
+                    if is_maintenance_command(card.name, set(current_config.claude.projects.keys())):
+                        logger.info("Detected /maintenance command: %s", card.name)
+                        _processing_cards.add(card.id)
+                        success = await handle_maintenance_command(
+                            card=card,
+                            trello=trello,
+                            state=state,
+                            config=current_config,
                         )
                         if success:
                             state.mark_processed(card.id)

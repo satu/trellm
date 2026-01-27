@@ -1,9 +1,23 @@
 """Tests for __main__ module."""
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from trellm.__main__ import parse_project, is_stats_command, handle_stats_command
+from trellm.__main__ import (
+    parse_project,
+    is_stats_command,
+    is_maintenance_command,
+    handle_stats_command,
+    handle_maintenance_command,
+)
+from trellm.config import (
+    Config,
+    TrelloConfig,
+    ClaudeConfig,
+    ProjectConfig,
+    MaintenanceConfig,
+)
+from trellm.maintenance import MaintenanceResult
 from trellm.trello import TrelloCard
 
 
@@ -145,3 +159,261 @@ class TestHandleStatsCommand:
         )
 
         assert result is False
+
+
+class TestIsMaintenanceCommand:
+    """Tests for is_maintenance_command function."""
+
+    def test_maintenance_command_basic(self):
+        """Test basic /maintenance command detection."""
+        assert is_maintenance_command("project /maintenance")
+        assert is_maintenance_command("trellm /maintenance")
+        assert is_maintenance_command("sus /maintenance")
+
+    def test_maintenance_command_with_colon(self):
+        """Test /maintenance with project colon format."""
+        assert is_maintenance_command("project: /maintenance")
+
+    def test_maintenance_command_case_insensitive(self):
+        """Test /maintenance is case insensitive."""
+        assert is_maintenance_command("project /MAINTENANCE")
+        assert is_maintenance_command("project /Maintenance")
+
+    def test_not_maintenance_command(self):
+        """Test regular cards are not detected as /maintenance."""
+        assert not is_maintenance_command("project Add maintenance feature")
+        assert not is_maintenance_command("trellm Fix bug")
+        assert not is_maintenance_command("project / maintenance")  # space breaks command
+
+    def test_maintenance_not_after_project_name(self):
+        """Test /maintenance must appear immediately after project name."""
+        # /maintenance appearing later in the card name should NOT match
+        assert not is_maintenance_command("trellm problem with the /maintenance command")
+        assert not is_maintenance_command("project fix /maintenance display")
+        assert not is_maintenance_command("myapp bug in /maintenance feature")
+
+    def test_maintenance_with_valid_projects_filter(self):
+        """Test /maintenance with valid_projects filter."""
+        valid = {"trellm", "myapp", "sus"}
+        # Should match when project is in valid set
+        assert is_maintenance_command("trellm /maintenance", valid)
+        assert is_maintenance_command("myapp /maintenance", valid)
+        assert is_maintenance_command("sus /maintenance", valid)
+        # Should NOT match when project is not in valid set
+        assert not is_maintenance_command("otherproject /maintenance", valid)
+        assert not is_maintenance_command("unknown /maintenance", valid)
+
+    def test_maintenance_single_word_not_matched(self):
+        """Test that single word cards are not matched."""
+        assert not is_maintenance_command("/maintenance")
+        assert not is_maintenance_command("project")
+
+
+class TestHandleMaintenanceCommand:
+    """Tests for handle_maintenance_command function."""
+
+    def _create_test_config(self, project: str = "testproject") -> Config:
+        """Create a test configuration."""
+        return Config(
+            trello=TrelloConfig(
+                api_key="key",
+                api_token="token",
+                board_id="board",
+                todo_list_id="todo",
+                ready_to_try_list_id="ready",
+                icebox_list_id="icebox",
+            ),
+            claude=ClaudeConfig(
+                binary="claude",
+                timeout=60,
+                projects={
+                    project: ProjectConfig(
+                        working_dir="/tmp/testproject",
+                        maintenance=MaintenanceConfig(enabled=True, interval=10),
+                    )
+                },
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_handle_maintenance_unknown_project(self, tmp_path):
+        """Test handling /maintenance for unknown project."""
+        from trellm.state import StateManager
+
+        state_file = tmp_path / "state.json"
+        state = StateManager(str(state_file))
+        config = self._create_test_config("otherproject")
+
+        card = TrelloCard(
+            id="maint-card-123",
+            name="unknownproject /maintenance",
+            url="https://trello.com/c/test",
+            description="",
+            last_activity="2026-01-24T10:00:00Z",
+        )
+
+        trello = MagicMock()
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+
+        result = await handle_maintenance_command(
+            card=card,
+            trello=trello,
+            state=state,
+            config=config,
+        )
+
+        assert result is True  # Card handled, just with error
+        trello.add_comment.assert_called_once()
+        comment_arg = trello.add_comment.call_args[0][1]
+        assert "not found in configuration" in comment_arg
+        trello.move_to_ready.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_maintenance_no_maintenance_config(self, tmp_path):
+        """Test handling /maintenance when maintenance not configured."""
+        from trellm.state import StateManager
+
+        state_file = tmp_path / "state.json"
+        state = StateManager(str(state_file))
+
+        # Config without maintenance
+        config = Config(
+            trello=TrelloConfig(
+                api_key="key",
+                api_token="token",
+                board_id="board",
+                todo_list_id="todo",
+            ),
+            claude=ClaudeConfig(
+                binary="claude",
+                timeout=60,
+                projects={
+                    "testproject": ProjectConfig(
+                        working_dir="/tmp/testproject",
+                        # No maintenance config
+                    )
+                },
+            ),
+        )
+
+        card = TrelloCard(
+            id="maint-card-123",
+            name="testproject /maintenance",
+            url="https://trello.com/c/test",
+            description="",
+            last_activity="2026-01-24T10:00:00Z",
+        )
+
+        trello = MagicMock()
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+
+        result = await handle_maintenance_command(
+            card=card,
+            trello=trello,
+            state=state,
+            config=config,
+        )
+
+        assert result is True
+        trello.add_comment.assert_called_once()
+        comment_arg = trello.add_comment.call_args[0][1]
+        assert "not configured" in comment_arg
+
+    @pytest.mark.asyncio
+    async def test_handle_maintenance_success(self, tmp_path):
+        """Test successful /maintenance command."""
+        from trellm.state import StateManager
+
+        state_file = tmp_path / "state.json"
+        state = StateManager(str(state_file))
+        config = self._create_test_config("testproject")
+
+        # Add some tickets to verify reset
+        state.add_processed_ticket("testproject", "card-1")
+        state.add_processed_ticket("testproject", "card-2")
+        assert state.get_ticket_count("testproject") == 2
+
+        card = TrelloCard(
+            id="maint-card-123",
+            name="testproject /maintenance",
+            url="https://trello.com/c/test",
+            description="",
+            last_activity="2026-01-24T10:00:00Z",
+        )
+
+        trello = MagicMock()
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+
+        mock_result = MaintenanceResult(
+            success=True,
+            summary="Maintenance completed successfully",
+            session_id="new-session-123",
+        )
+
+        with patch("trellm.__main__.run_maintenance", return_value=mock_result) as mock_run:
+            result = await handle_maintenance_command(
+                card=card,
+                trello=trello,
+                state=state,
+                config=config,
+            )
+
+            mock_run.assert_called_once()
+
+        assert result is True
+        trello.add_comment.assert_called_once()
+        comment_arg = trello.add_comment.call_args[0][1]
+        assert "/maintenance command completed" in comment_arg
+        assert "testproject" in comment_arg
+        trello.move_to_ready.assert_called_once()
+
+        # Verify state was updated
+        assert state.get_ticket_count("testproject") == 0  # Reset
+        assert state.get_last_maintenance("testproject") is not None
+        assert state.get_session("testproject") == "new-session-123"
+
+    @pytest.mark.asyncio
+    async def test_handle_maintenance_failure(self, tmp_path):
+        """Test failed /maintenance command."""
+        from trellm.state import StateManager
+
+        state_file = tmp_path / "state.json"
+        state = StateManager(str(state_file))
+        config = self._create_test_config("testproject")
+
+        card = TrelloCard(
+            id="maint-card-123",
+            name="testproject /maintenance",
+            url="https://trello.com/c/test",
+            description="",
+            last_activity="2026-01-24T10:00:00Z",
+        )
+
+        trello = MagicMock()
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+
+        mock_result = MaintenanceResult(
+            success=False,
+            summary="Maintenance timed out",
+        )
+
+        with patch("trellm.__main__.run_maintenance", return_value=mock_result):
+            result = await handle_maintenance_command(
+                card=card,
+                trello=trello,
+                state=state,
+                config=config,
+            )
+
+        assert result is True  # Card was handled
+        comment_arg = trello.add_comment.call_args[0][1]
+        assert "/maintenance command failed" in comment_arg
+        assert "testproject" in comment_arg
+        trello.move_to_ready.assert_called_once()
+
+        # Verify state was NOT updated (no reset on failure)
+        assert state.get_last_maintenance("testproject") is None
