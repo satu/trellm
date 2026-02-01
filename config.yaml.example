@@ -15,6 +15,8 @@ trello:
   # If both done_board_id and done_list_id are set, cards will be moved there
   # done_board_id: "destination-board-id"
   # done_list_id: "destination-list-id"
+  # Optional: ICE BOX list for maintenance suggestion cards
+  # icebox_list_id: "your-icebox-list-id"
 
 polling:
   # How often to check for new cards (in seconds)
@@ -27,6 +29,10 @@ claude:
   timeout: 1200
   # Run with --dangerously-skip-permissions (default: false)
   yolo: false
+  # Global maintenance settings (applies to all projects unless overridden)
+  # maintenance:
+  #   enabled: true
+  #   interval: 10  # Run maintenance every N tickets
   # Per-project configuration
   projects:
     # Project name matches first word of card name
@@ -34,6 +40,12 @@ claude:
       working_dir: "~/src/myproject"
       # Optional: resume an existing Claude Code session
       # session_id: "existing-session-id"
+      # Optional: custom instructions for /compact command
+      # compact_prompt: "Preserve Trello workflow context and session management patterns"
+      # Optional: per-project maintenance settings (overrides global)
+      # maintenance:
+      #   enabled: true
+      #   interval: 10
 
 state:
   # Where to store session IDs and processed card tracking
