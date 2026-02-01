@@ -222,6 +222,7 @@ async def handle_maintenance_command(
             last_maintenance=last_maintenance,
             trello_client=trello,
             icebox_list_id=config.trello.icebox_list_id,
+            compact_prompt=config.get_compact_prompt(project),
         )
 
         if result.success:
@@ -421,6 +422,7 @@ async def process_cards(
                     last_maintenance=state.get_last_maintenance(project),
                     trello_client=trello,
                     icebox_list_id=config.trello.icebox_list_id,
+                    compact_prompt=config.get_compact_prompt(project),
                 )
                 if maint_result.success:
                     state.set_last_maintenance(project)
@@ -537,6 +539,7 @@ async def process_card_for_project(
                     last_maintenance=state.get_last_maintenance(project),
                     trello_client=trello,
                     icebox_list_id=config.trello.icebox_list_id,
+                    compact_prompt=config.get_compact_prompt(project),
                 )
                 if maint_result.success:
                     state.set_last_maintenance(project)

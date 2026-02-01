@@ -165,6 +165,33 @@ class TestBuildMaintenancePrompt:
         # Should emphasize no file creation
         assert "DO NOT create" in prompt or "DO NOT modify" in prompt
 
+    def test_prompt_uses_last_maintenance_for_git_history(self):
+        """Test that git history instruction references last_maintenance timestamp."""
+        timestamp = "2026-01-15T10:00:00Z"
+        prompt = build_maintenance_prompt(
+            project="proj",
+            ticket_count=10,
+            last_maintenance=timestamp,
+            interval=10,
+        )
+
+        # Should reference commits since last maintenance, not interval
+        assert f"all commits since {timestamp}" in prompt
+        # Should NOT use the old interval-based instruction
+        assert "last 10 commits" not in prompt
+
+    def test_prompt_uses_never_for_git_history_when_no_last_maintenance(self):
+        """Test that git history says 'never' when no prior maintenance."""
+        prompt = build_maintenance_prompt(
+            project="proj",
+            ticket_count=10,
+            last_maintenance=None,
+            interval=10,
+        )
+
+        # Should reference "never" for first-time maintenance
+        assert "all commits since never" in prompt
+
 
 class TestMaintenanceResult:
     """Tests for MaintenanceResult dataclass."""
@@ -301,7 +328,118 @@ class TestRunMaintenance:
 
     @pytest.mark.asyncio
     async def test_run_maintenance_resumes_session(self, tmp_path):
-        """Test that maintenance resumes existing session."""
+        """Test that maintenance compacts first then resumes with compacted session."""
+        # Create separate mocks for compact and maintenance calls
+        compact_proc = AsyncMock()
+        compact_proc.returncode = 0
+        compact_proc.communicate = AsyncMock(
+            return_value=(
+                b'{"session_id":"compacted-session-id"}\n',
+                b"",
+            )
+        )
+
+        maintenance_proc = AsyncMock()
+        maintenance_proc.returncode = 0
+        maintenance_proc.communicate = AsyncMock(
+            return_value=(
+                b'{"type":"result","result":"Done","session_id":"s1"}\n',
+                b"",
+            )
+        )
+
+        call_count = 0
+
+        async def mock_subprocess(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            # First call is compact, second is maintenance
+            if call_count == 1:
+                return compact_proc
+            return maintenance_proc
+
+        with patch(
+            "asyncio.create_subprocess_exec", side_effect=mock_subprocess
+        ) as mock_exec:
+            await run_maintenance(
+                project="testproject",
+                working_dir=str(tmp_path),
+                session_id="existing-session-id",
+                claude_config=ClaudeConfig(binary="claude", timeout=60),
+                maintenance_config=MaintenanceConfig(enabled=True, interval=10),
+                ticket_count=10,
+                last_maintenance=None,
+            )
+
+            # Should have been called twice: compact then maintenance
+            assert mock_exec.call_count == 2
+
+            # First call should be compact with original session
+            compact_call_args = mock_exec.call_args_list[0][0]
+            assert "/compact" in compact_call_args
+            assert "--resume" in compact_call_args
+            assert "existing-session-id" in compact_call_args
+
+            # Second call should be maintenance with compacted session
+            maintenance_call_args = mock_exec.call_args_list[1][0]
+            assert "--resume" in maintenance_call_args
+            assert "compacted-session-id" in maintenance_call_args
+
+    @pytest.mark.asyncio
+    async def test_run_maintenance_continues_when_compact_fails(self, tmp_path):
+        """Test that maintenance continues with original session when compact fails."""
+        # Create mock for compact that fails
+        compact_proc = AsyncMock()
+        compact_proc.returncode = 1  # Non-zero = failure
+        compact_proc.communicate = AsyncMock(
+            return_value=(b"", b"Compact failed\n")
+        )
+
+        maintenance_proc = AsyncMock()
+        maintenance_proc.returncode = 0
+        maintenance_proc.communicate = AsyncMock(
+            return_value=(
+                b'{"type":"result","result":"Done","session_id":"s1"}\n',
+                b"",
+            )
+        )
+
+        call_count = 0
+
+        async def mock_subprocess(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return compact_proc
+            return maintenance_proc
+
+        with patch(
+            "asyncio.create_subprocess_exec", side_effect=mock_subprocess
+        ) as mock_exec:
+            result = await run_maintenance(
+                project="testproject",
+                working_dir=str(tmp_path),
+                session_id="existing-session-id",
+                claude_config=ClaudeConfig(binary="claude", timeout=60),
+                maintenance_config=MaintenanceConfig(enabled=True, interval=10),
+                ticket_count=10,
+                last_maintenance=None,
+            )
+
+            # Maintenance should still succeed despite compact failure
+            assert result.success
+
+            # Should have been called twice
+            assert mock_exec.call_count == 2
+
+            # Second call should use original session ID (compact failed)
+            maintenance_call_args = mock_exec.call_args_list[1][0]
+            assert "--resume" in maintenance_call_args
+            assert "existing-session-id" in maintenance_call_args
+
+    @pytest.mark.asyncio
+    async def test_run_maintenance_no_compact_without_session(self, tmp_path):
+        """Test that maintenance skips compaction when there's no existing session."""
         mock_proc = AsyncMock()
         mock_proc.returncode = 0
         mock_proc.communicate = AsyncMock(
@@ -317,17 +455,19 @@ class TestRunMaintenance:
             await run_maintenance(
                 project="testproject",
                 working_dir=str(tmp_path),
-                session_id="existing-session-id",
+                session_id=None,  # No session = no compact
                 claude_config=ClaudeConfig(binary="claude", timeout=60),
                 maintenance_config=MaintenanceConfig(enabled=True, interval=10),
                 ticket_count=10,
                 last_maintenance=None,
             )
 
-            # Check that --resume was passed with session ID
-            call_args = mock_exec.call_args
-            assert "--resume" in call_args[0]
-            assert "existing-session-id" in call_args[0]
+            # Should only be called once (maintenance, no compact)
+            assert mock_exec.call_count == 1
+
+            # Should not have --resume
+            call_args = mock_exec.call_args[0]
+            assert "--resume" not in call_args
 
 
 class TestStateManagerMaintenance:

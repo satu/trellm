@@ -54,7 +54,7 @@ Please perform the following maintenance tasks and output your findings as a sum
 ## 1. CLAUDE.md Review
 - Check if CLAUDE.md exists in the project directory
 - If it exists, review its contents
-- Analyze recent work patterns from git history (last {interval} commits)
+- Analyze recent work patterns from git history (all commits since {last_maint_str})
 - Note any updates needed for:
   - New coding conventions discovered
   - Architecture decisions made
@@ -103,6 +103,100 @@ Your final output MUST be a summary in this exact format (this will be saved to 
 Be concise. Focus on actionable improvements. DO NOT create or modify any files."""
 
 
+async def _run_compact(
+    session_id: str,
+    working_dir: str,
+    claude_config: ClaudeConfig,
+    prefix: str,
+    compact_prompt: Optional[str] = None,
+) -> Optional[str]:
+    """Run /compact command on a session to reduce context size.
+
+    Args:
+        session_id: The session ID to compact
+        working_dir: Working directory for Claude Code
+        claude_config: Claude configuration
+        prefix: Project prefix for logging
+        compact_prompt: Optional custom instructions for compaction
+
+    Returns:
+        New session ID if successful, None otherwise
+    """
+    # Build compact command with optional custom instructions
+    compact_cmd = "/compact"
+    if compact_prompt:
+        compact_cmd = f"/compact {compact_prompt}"
+        logger.info("%sRunning /compact with custom prompt: %s", prefix, compact_prompt[:50])
+    else:
+        logger.info("%sRunning /compact to reduce context size", prefix)
+
+    cmd = [
+        claude_config.binary,
+        "-p",
+        compact_cmd,
+        "--resume",
+        session_id,
+        "--output-format",
+        "json",
+    ]
+
+    if claude_config.yolo:
+        cmd.append("--dangerously-skip-permissions")
+
+    cwd = Path(working_dir).expanduser()
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+            limit=10 * 1024 * 1024,
+        )
+
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(),
+            timeout=120,  # Compact should be quick
+        )
+
+        if proc.returncode != 0:
+            logger.warning(
+                "%s/compact failed with return code %d: %s",
+                prefix,
+                proc.returncode,
+                stderr.decode(),
+            )
+            return None
+
+        # Parse output to get new session ID
+        output = stdout.decode()
+        new_session_id = None
+        for line in reversed(output.strip().split("\n")):
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    data = json.loads(line)
+                    if "session_id" in data:
+                        new_session_id = data["session_id"]
+                        break
+                except json.JSONDecodeError:
+                    continue
+
+        if not new_session_id:
+            logger.warning("%s/compact completed but no session ID found", prefix)
+            return None
+
+        logger.info("%s/compact successful, new session: %s", prefix, new_session_id)
+        return new_session_id
+
+    except asyncio.TimeoutError:
+        logger.warning("%s/compact timed out", prefix)
+        return None
+    except Exception as e:
+        logger.warning("%s/compact failed: %s", prefix, e)
+        return None
+
+
 async def run_maintenance(
     project: str,
     working_dir: str,
@@ -113,8 +207,12 @@ async def run_maintenance(
     last_maintenance: Optional[str],
     trello_client: Optional[TrelloClient] = None,
     icebox_list_id: Optional[str] = None,
+    compact_prompt: Optional[str] = None,
 ) -> MaintenanceResult:
     """Run the maintenance skill for a project.
+
+    Runs /compact first if there's an existing session, then runs the maintenance
+    prompt to analyze the codebase and provide recommendations.
 
     Args:
         project: Project name
@@ -126,6 +224,7 @@ async def run_maintenance(
         last_maintenance: ISO timestamp of last maintenance run
         trello_client: Optional Trello client for creating maintenance cards
         icebox_list_id: Optional ICE BOX list ID for maintenance cards
+        compact_prompt: Optional custom instructions for /compact
 
     Returns:
         MaintenanceResult with success status and summary
@@ -137,6 +236,26 @@ async def run_maintenance(
         ticket_count,
         maintenance_config.interval,
     )
+
+    # Run /compact first if we have an existing session
+    # This ensures maintenance sees a fresh context covering the last N tickets
+    current_session_id = session_id
+    if session_id:
+        logger.info("%sCompacting session before maintenance", prefix)
+        compacted_session_id = await _run_compact(
+            session_id=session_id,
+            working_dir=working_dir,
+            claude_config=claude_config,
+            prefix=prefix,
+            compact_prompt=compact_prompt,
+        )
+        if compacted_session_id:
+            current_session_id = compacted_session_id
+            logger.info("%sUsing compacted session for maintenance", prefix)
+        else:
+            logger.warning(
+                "%sCompaction failed, continuing with original session", prefix
+            )
 
     # Build maintenance prompt
     prompt = build_maintenance_prompt(
@@ -158,8 +277,8 @@ async def run_maintenance(
     if claude_config.yolo:
         cmd.append("--dangerously-skip-permissions")
 
-    if session_id:
-        cmd.extend(["--resume", session_id])
+    if current_session_id:
+        cmd.extend(["--resume", current_session_id])
 
     cwd = Path(working_dir).expanduser()
 
