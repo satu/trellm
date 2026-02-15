@@ -58,6 +58,17 @@ for line in reversed(output.strip().split("\n")):
             continue
 ```
 
+### Project Alias Resolution
+Projects can have aliases (short names). `Config.resolve_project()` maps aliases to canonical names:
+```python
+# In config.yaml:
+#   smugcoin:
+#     working_dir: ~/src/smugcoin
+#     aliases: ["smg"]
+# Card "smg fix bug" resolves to project "smugcoin"
+project = config.resolve_project(parse_project(card.name))
+```
+
 ### Configuration Override Pattern
 Global settings with per-project overrides:
 ```python

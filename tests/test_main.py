@@ -86,6 +86,13 @@ class TestIsStatsCommand:
         assert not is_stats_command("/stats")
         assert not is_stats_command("project")
 
+    def test_stats_with_alias_in_valid_projects(self):
+        """Test /stats with aliases included in valid_projects set."""
+        # Aliases should be included in the valid set via get_all_project_names()
+        valid = {"smugcoin", "smg", "myapp"}
+        assert is_stats_command("smg /stats", valid)
+        assert is_stats_command("smugcoin /stats", valid)
+
 
 class TestHandleStatsCommand:
     """Tests for handle_stats_command function."""
@@ -207,6 +214,12 @@ class TestIsMaintenanceCommand:
         """Test that single word cards are not matched."""
         assert not is_maintenance_command("/maintenance")
         assert not is_maintenance_command("project")
+
+    def test_maintenance_with_alias_in_valid_projects(self):
+        """Test /maintenance with aliases included in valid_projects set."""
+        valid = {"smugcoin", "smg", "myapp"}
+        assert is_maintenance_command("smg /maintenance", valid)
+        assert is_maintenance_command("smugcoin /maintenance", valid)
 
 
 class TestHandleMaintenanceCommand:
@@ -417,3 +430,71 @@ class TestHandleMaintenanceCommand:
 
         # Verify state was NOT updated (no reset on failure)
         assert state.get_last_maintenance("testproject") is None
+
+    @pytest.mark.asyncio
+    async def test_handle_maintenance_with_alias(self, tmp_path):
+        """Test /maintenance command using a project alias."""
+        from trellm.state import StateManager
+
+        state_file = tmp_path / "state.json"
+        state = StateManager(str(state_file))
+
+        # Config with alias
+        config = Config(
+            trello=TrelloConfig(
+                api_key="key",
+                api_token="token",
+                board_id="board",
+                todo_list_id="todo",
+                ready_to_try_list_id="ready",
+                icebox_list_id="icebox",
+            ),
+            claude=ClaudeConfig(
+                binary="claude",
+                timeout=60,
+                projects={
+                    "smugcoin": ProjectConfig(
+                        working_dir="/tmp/smugcoin",
+                        aliases=["smg"],
+                        maintenance=MaintenanceConfig(enabled=True, interval=10),
+                    )
+                },
+            ),
+        )
+
+        # Card uses alias "smg" instead of canonical "smugcoin"
+        card = TrelloCard(
+            id="maint-alias-123",
+            name="smg /maintenance",
+            url="https://trello.com/c/test",
+            description="",
+            last_activity="2026-01-24T10:00:00Z",
+        )
+
+        trello = MagicMock()
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+
+        mock_result = MaintenanceResult(
+            success=True,
+            summary="Maintenance completed via alias",
+            session_id="alias-session-123",
+        )
+
+        with patch("trellm.__main__.run_maintenance", return_value=mock_result) as mock_run:
+            result = await handle_maintenance_command(
+                card=card,
+                trello=trello,
+                state=state,
+                config=config,
+            )
+
+            mock_run.assert_called_once()
+            # Verify it was called with the canonical project name
+            call_kwargs = mock_run.call_args[1]
+            assert call_kwargs["project"] == "smugcoin"
+
+        assert result is True
+        comment_arg = trello.add_comment.call_args[0][1]
+        assert "/maintenance command completed" in comment_arg
+        assert "smugcoin" in comment_arg

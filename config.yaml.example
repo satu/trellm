@@ -38,6 +38,9 @@ claude:
     # Project name matches first word of card name
     myproject:
       working_dir: "~/src/myproject"
+      # Optional: short aliases for the project name
+      # Cards starting with any alias will be routed to this project
+      # aliases: ["mp", "myp"]
       # Optional: resume an existing Claude Code session
       # session_id: "existing-session-id"
       # Optional: custom instructions for /compact command

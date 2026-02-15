@@ -170,14 +170,15 @@ async def handle_maintenance_command(
     Returns:
         True if handled successfully, False otherwise.
     """
-    project = parse_project(card.name)
+    parsed_name = parse_project(card.name)
+    project = config.resolve_project(parsed_name)
 
     # Validate project exists
-    if project not in config.claude.projects:
-        error_msg = f"Claude: /maintenance command failed\n\nProject '{project}' not found in configuration."
+    if project is None:
+        error_msg = f"Claude: /maintenance command failed\n\nProject '{parsed_name}' not found in configuration."
         await trello.add_comment(card.id, error_msg)
         await trello.move_to_ready(card.id)
-        logger.warning("Maintenance command for unknown project: %s", project)
+        logger.warning("Maintenance command for unknown project: %s", parsed_name)
         return True  # Card handled, just with an error
 
     # Get maintenance config
@@ -301,6 +302,10 @@ def compare_configs(old: Config, new: Config) -> list[str]:
             changes.append(
                 f"{proj}.compact_prompt: {old_proj.compact_prompt} → {new_proj.compact_prompt}"
             )
+        if sorted(old_proj.aliases) != sorted(new_proj.aliases):
+            changes.append(
+                f"{proj}.aliases: {old_proj.aliases} → {new_proj.aliases}"
+            )
 
     # Compare Trello config (only relevant fields)
     if old.trello.ready_to_try_list_id != new.trello.ready_to_try_list_id:
@@ -351,7 +356,7 @@ async def process_cards(
 
         # Check for /stats command - handle directly without Claude
         # Only recognize /stats for configured projects
-        if is_stats_command(card.name, set(config.claude.projects.keys())):
+        if is_stats_command(card.name, config.get_all_project_names()):
             logger.info("Detected /stats command: %s", card.name)
             success = await handle_stats_command(
                 card=card,
@@ -366,7 +371,7 @@ async def process_cards(
 
         # Check for /maintenance command - handle directly without Claude
         # Only recognize /maintenance for configured projects
-        if is_maintenance_command(card.name, set(config.claude.projects.keys())):
+        if is_maintenance_command(card.name, config.get_all_project_names()):
             logger.info("Detected /maintenance command: %s", card.name)
             success = await handle_maintenance_command(
                 card=card,
@@ -379,14 +384,15 @@ async def process_cards(
                 processed_count += 1
             continue
 
-        project = parse_project(card.name)
+        parsed_name = parse_project(card.name)
+        project = config.resolve_project(parsed_name)
 
         # Skip cards for unrecognized projects
-        if project not in config.claude.projects:
+        if project is None:
             logger.warning(
                 "Skipping card %s: project '%s' not in config (card: %s)",
                 card.id,
-                project,
+                parsed_name,
                 card.name[:50],
             )
             continue
@@ -707,7 +713,7 @@ async def run_polling_loop(
 
                     # Check for /stats command - handle directly without Claude
                     # Only recognize /stats for configured projects
-                    if is_stats_command(card.name, set(current_config.claude.projects.keys())):
+                    if is_stats_command(card.name, current_config.get_all_project_names()):
                         logger.info("Detected /stats command: %s", card.name)
                         _processing_cards.add(card.id)
                         success = await handle_stats_command(
@@ -723,7 +729,7 @@ async def run_polling_loop(
 
                     # Check for /maintenance command - handle directly without Claude
                     # Only recognize /maintenance for configured projects
-                    if is_maintenance_command(card.name, set(current_config.claude.projects.keys())):
+                    if is_maintenance_command(card.name, current_config.get_all_project_names()):
                         logger.info("Detected /maintenance command: %s", card.name)
                         _processing_cards.add(card.id)
                         success = await handle_maintenance_command(
@@ -737,14 +743,15 @@ async def run_polling_loop(
                         _processing_cards.discard(card.id)
                         continue
 
-                    project = parse_project(card.name)
+                    parsed_name = parse_project(card.name)
+                    project = current_config.resolve_project(parsed_name)
 
                     # Skip cards for unrecognized projects
-                    if project not in current_config.claude.projects:
+                    if project is None:
                         logger.warning(
                             "Skipping card %s: project '%s' not in config (card: %s)",
                             card.id,
-                            project,
+                            parsed_name,
                             card.name[:50],
                         )
                         continue

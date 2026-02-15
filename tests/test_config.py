@@ -179,6 +179,174 @@ class TestConfig:
         assert config.get_compact_prompt("unknown") is None
 
 
+class TestResolveProject:
+    """Tests for Config.resolve_project method."""
+
+    def _make_config(self) -> Config:
+        return Config(
+            trello=TrelloConfig(
+                api_key="",
+                api_token="",
+                board_id="",
+                todo_list_id="",
+            ),
+            claude=ClaudeConfig(
+                projects={
+                    "smugcoin": ProjectConfig(
+                        working_dir="~/src/smugcoin",
+                        aliases=["smg"],
+                    ),
+                    "myproject": ProjectConfig(
+                        working_dir="~/src/myproject",
+                        aliases=["mp", "myp"],
+                    ),
+                    "noalias": ProjectConfig(
+                        working_dir="~/src/noalias",
+                    ),
+                }
+            ),
+        )
+
+    def test_resolve_direct_name(self):
+        """Test resolving a canonical project name."""
+        config = self._make_config()
+        assert config.resolve_project("smugcoin") == "smugcoin"
+        assert config.resolve_project("myproject") == "myproject"
+        assert config.resolve_project("noalias") == "noalias"
+
+    def test_resolve_alias(self):
+        """Test resolving a project alias."""
+        config = self._make_config()
+        assert config.resolve_project("smg") == "smugcoin"
+        assert config.resolve_project("mp") == "myproject"
+        assert config.resolve_project("myp") == "myproject"
+
+    def test_resolve_unknown(self):
+        """Test resolving an unknown name returns None."""
+        config = self._make_config()
+        assert config.resolve_project("unknown") is None
+        assert config.resolve_project("") is None
+
+    def test_direct_name_takes_priority_over_alias(self):
+        """Test that direct project name match takes priority over alias."""
+        config = Config(
+            trello=TrelloConfig(
+                api_key="", api_token="", board_id="", todo_list_id="",
+            ),
+            claude=ClaudeConfig(
+                projects={
+                    "smg": ProjectConfig(working_dir="~/src/smg"),
+                    "smugcoin": ProjectConfig(
+                        working_dir="~/src/smugcoin",
+                        aliases=["smg"],
+                    ),
+                }
+            ),
+        )
+        # Direct name match should win over alias
+        assert config.resolve_project("smg") == "smg"
+
+
+class TestGetAllProjectNames:
+    """Tests for Config.get_all_project_names method."""
+
+    def test_projects_without_aliases(self):
+        """Test with projects that have no aliases."""
+        config = Config(
+            trello=TrelloConfig(
+                api_key="", api_token="", board_id="", todo_list_id="",
+            ),
+            claude=ClaudeConfig(
+                projects={
+                    "proj1": ProjectConfig(working_dir="~/src/proj1"),
+                    "proj2": ProjectConfig(working_dir="~/src/proj2"),
+                }
+            ),
+        )
+        assert config.get_all_project_names() == {"proj1", "proj2"}
+
+    def test_projects_with_aliases(self):
+        """Test with projects that have aliases."""
+        config = Config(
+            trello=TrelloConfig(
+                api_key="", api_token="", board_id="", todo_list_id="",
+            ),
+            claude=ClaudeConfig(
+                projects={
+                    "smugcoin": ProjectConfig(
+                        working_dir="~/src/smugcoin",
+                        aliases=["smg"],
+                    ),
+                    "myproject": ProjectConfig(
+                        working_dir="~/src/myproject",
+                        aliases=["mp", "myp"],
+                    ),
+                }
+            ),
+        )
+        assert config.get_all_project_names() == {
+            "smugcoin", "smg", "myproject", "mp", "myp",
+        }
+
+
+class TestLoadConfigWithAliases:
+    """Tests for loading aliases from config file."""
+
+    def test_load_aliases_from_file(self, tmp_path):
+        """Test loading project aliases from YAML config."""
+        config_data = {
+            "trello": {
+                "api_key": "key",
+                "api_token": "token",
+                "board_id": "board",
+                "todo_list_id": "list",
+            },
+            "claude": {
+                "projects": {
+                    "smugcoin": {
+                        "working_dir": "~/src/smugcoin",
+                        "aliases": ["smg", "sc"],
+                    }
+                },
+            },
+        }
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml.dump(config_data))
+
+        config = load_config(str(config_file))
+
+        assert "smugcoin" in config.claude.projects
+        assert config.claude.projects["smugcoin"].aliases == ["smg", "sc"]
+        assert config.resolve_project("smg") == "smugcoin"
+        assert config.resolve_project("sc") == "smugcoin"
+
+    def test_load_no_aliases_defaults_empty(self, tmp_path):
+        """Test that missing aliases defaults to empty list."""
+        config_data = {
+            "trello": {
+                "api_key": "key",
+                "api_token": "token",
+                "board_id": "board",
+                "todo_list_id": "list",
+            },
+            "claude": {
+                "projects": {
+                    "myproject": {
+                        "working_dir": "~/src/myproject",
+                    }
+                },
+            },
+        }
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml.dump(config_data))
+
+        config = load_config(str(config_file))
+
+        assert config.claude.projects["myproject"].aliases == []
+
+
 class TestConfigComparison:
     """Tests for config comparison functions."""
 
@@ -336,6 +504,35 @@ class TestConfigComparison:
         assert not configs_equal(config1, config2)
         changes = compare_configs(config1, config2)
         assert any("proj1.compact_prompt" in c for c in changes)
+
+    def test_configs_equal_aliases_changed(self):
+        """Test detecting project aliases change."""
+        config1 = self._make_config(
+            claude=ClaudeConfig(
+                binary="claude",
+                timeout=600,
+                yolo=False,
+                projects={"proj1": ProjectConfig(
+                    working_dir="~/src/proj1",
+                    aliases=["p1"],
+                )},
+            )
+        )
+        config2 = self._make_config(
+            claude=ClaudeConfig(
+                binary="claude",
+                timeout=600,
+                yolo=False,
+                projects={"proj1": ProjectConfig(
+                    working_dir="~/src/proj1",
+                    aliases=["p1", "pr1"],
+                )},
+            )
+        )
+
+        assert not configs_equal(config1, config2)
+        changes = compare_configs(config1, config2)
+        assert any("proj1.aliases" in c for c in changes)
 
 
 class TestParseProject:

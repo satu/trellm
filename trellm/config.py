@@ -40,6 +40,7 @@ class ProjectConfig:
     session_id: Optional[str] = None
     compact_prompt: Optional[str] = None  # Custom instructions for /compact
     maintenance: Optional[MaintenanceConfig] = None
+    aliases: list[str] = field(default_factory=list)  # Short names that map to this project
 
 
 @dataclass
@@ -77,6 +78,28 @@ class Config:
         """Get custom compaction prompt for a project."""
         proj = self.claude.projects.get(project)
         return proj.compact_prompt if proj else None
+
+    def resolve_project(self, name: str) -> Optional[str]:
+        """Resolve a project name or alias to the canonical project name.
+
+        Returns the canonical project name if found (direct match or alias),
+        or None if not found.
+        """
+        # Direct match takes priority
+        if name in self.claude.projects:
+            return name
+        # Check aliases
+        for proj_name, proj_config in self.claude.projects.items():
+            if name in proj_config.aliases:
+                return proj_name
+        return None
+
+    def get_all_project_names(self) -> set[str]:
+        """Get all valid project names including aliases."""
+        names = set(self.claude.projects.keys())
+        for proj_config in self.claude.projects.values():
+            names.update(proj_config.aliases)
+        return names
 
     def get_maintenance_config(self, project: str) -> Optional[MaintenanceConfig]:
         """Get maintenance configuration for a project.
@@ -151,6 +174,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
             session_id=proj_data.get("session_id"),
             compact_prompt=proj_data.get("compact_prompt"),
             maintenance=maintenance,
+            aliases=proj_data.get("aliases", []),
         )
 
     # Parse global maintenance config if present
