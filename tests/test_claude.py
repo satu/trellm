@@ -13,6 +13,7 @@ from trellm.claude import (
     CostInfo,
     PromptTooLongError,
     RateLimitError,
+    SessionNotFoundError,
     PROMPT_TOO_LONG_DETAILED_PATTERN,
     PROMPT_TOO_LONG_SIMPLE_PATTERN,
     RATE_LIMIT_PATTERN,
@@ -443,6 +444,29 @@ class TestClaudeRunnerErrorChecking:
 
         # Should not raise
         runner._check_for_errors(stderr, stdout)
+
+    def test_check_for_session_not_found_in_stderr(self, runner):
+        """Test detection of 'No conversation found' error in stderr."""
+        stderr = "No conversation found with session ID: 25cb59:7-3397-4d5f-ae30-b6f070fc36af"
+
+        with pytest.raises(SessionNotFoundError):
+            runner._check_for_errors(stderr, "")
+
+    def test_check_for_session_not_found_in_stdout(self, runner):
+        """Test detection of 'No conversation found' error in stdout."""
+        stdout = '{"type":"result","result":"No conversation found with session ID: abc-123"}'
+
+        with pytest.raises(SessionNotFoundError):
+            runner._check_for_errors("", stdout)
+
+    def test_check_for_session_not_found_preserves_session_id(self, runner):
+        """Test that SessionNotFoundError captures the session_id context."""
+        stderr = "No conversation found with session ID: stale-session-id"
+
+        with pytest.raises(SessionNotFoundError) as exc_info:
+            runner._check_for_errors(stderr, "", session_id="stale-session-id")
+
+        assert exc_info.value.session_id == "stale-session-id"
 
 
 class TestClaudeRunnerFailureReporting:
@@ -986,6 +1010,59 @@ class TestClaudeRunnerRetryLogic:
                                 session_id="session",
                                 working_dir="/tmp/test",
                             )
+
+    @pytest.mark.asyncio
+    async def test_run_session_not_found_retries_without_session(self, runner, mock_card):
+        """Test that SessionNotFoundError clears session and retries."""
+        expected_result = ClaudeResult(
+            success=True,
+            session_id="new-session",
+            summary="Task completed",
+            output="{}",
+        )
+
+        call_count = 0
+
+        async def mock_run_once(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise SessionNotFoundError(
+                    "No conversation found", session_id="stale-session"
+                )
+            return expected_result
+
+        with patch.object(runner, "_run_once", side_effect=mock_run_once) as mock_run:
+            with patch.object(runner, "_run_cost", return_value=None):
+                result = await runner.run(
+                    card=mock_card,
+                    project="test",
+                    session_id="stale-session",
+                    working_dir="/tmp/test",
+                    last_card_id=mock_card.id,  # Same card to skip pre-compaction
+                )
+
+        assert result == expected_result
+        assert call_count == 2
+        # Second call should have session_id=None
+        second_call = mock_run.call_args_list[1]
+        assert second_call.kwargs.get("session_id") is None
+
+    @pytest.mark.asyncio
+    async def test_run_session_not_found_no_retry_without_session(self, runner, mock_card):
+        """Test that SessionNotFoundError without a session doesn't retry."""
+        async def mock_run_once(*args, **kwargs):
+            raise SessionNotFoundError("No conversation found", session_id=None)
+
+        with patch.object(runner, "_run_once", side_effect=mock_run_once):
+            with patch.object(runner, "_run_cost", return_value=None):
+                with pytest.raises(RuntimeError, match="Session not found"):
+                    await runner.run(
+                        card=mock_card,
+                        project="test",
+                        session_id=None,
+                        working_dir="/tmp/test",
+                    )
 
 
 class TestClaudeRunnerCost:

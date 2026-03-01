@@ -39,6 +39,8 @@ RATE_LIMIT_USER_PATTERN = re.compile(r"you've hit your limit", re.IGNORECASE)
 RATE_LIMIT_RESET_DURATION_PATTERN = re.compile(r"resets?\s+(?:in\s+)?(\d+)\s*(hours?|minutes?|h|m|days?|d)", re.IGNORECASE)
 # Reset time as clock time (e.g., "resets 8pm (UTC)", "resets 10am")
 RATE_LIMIT_RESET_TIME_PATTERN = re.compile(r"resets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*(?:\(?(UTC|GMT)?\)?)?", re.IGNORECASE)
+# Session not found (e.g., "No conversation found with session ID: ...")
+SESSION_NOT_FOUND_PATTERN = re.compile(r"No conversation found with session ID", re.IGNORECASE)
 
 
 @dataclass
@@ -352,6 +354,14 @@ class RateLimitError(Exception):
         self.reset_seconds = reset_seconds
 
 
+class SessionNotFoundError(Exception):
+    """Raised when Claude Code cannot find the session ID."""
+
+    def __init__(self, message: str, session_id: Optional[str] = None):
+        super().__init__(message)
+        self.session_id = session_id
+
+
 class ClaudeRunner:
     """Runs Claude Code as a subprocess."""
 
@@ -381,8 +391,16 @@ class ClaudeRunner:
         Raises:
             PromptTooLongError: If prompt exceeds token limit
             RateLimitError: If rate limit is hit
+            SessionNotFoundError: If session ID is not found
         """
         combined = stderr + stdout
+
+        # Check for session not found (before other checks - this is a distinct error)
+        if SESSION_NOT_FOUND_PATTERN.search(combined):
+            raise SessionNotFoundError(
+                "No conversation found with session ID",
+                session_id=session_id,
+            )
 
         # Check for prompt too long - try detailed pattern first for token counts
         match = PROMPT_TOO_LONG_DETAILED_PATTERN.search(combined)
@@ -873,6 +891,17 @@ class ClaudeRunner:
                 else:
                     logger.error("%s/compact failed, cannot retry", prefix)
                     raise RuntimeError(f"Prompt too long and compact failed: {e}") from e
+
+            except SessionNotFoundError as e:
+                last_error = e
+                if not current_session_id:
+                    raise RuntimeError(f"Session not found: {e}") from e
+
+                logger.warning(
+                    "%sSession not found (stale session ID), clearing and retrying",
+                    prefix,
+                )
+                current_session_id = None
 
             except RateLimitError as e:
                 last_error = e
