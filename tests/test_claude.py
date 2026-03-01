@@ -445,6 +445,119 @@ class TestClaudeRunnerErrorChecking:
         runner._check_for_errors(stderr, stdout)
 
 
+class TestClaudeRunnerFailureReporting:
+    """Tests for error reporting when Claude Code fails with non-zero exit."""
+
+    @pytest.fixture
+    def runner(self):
+        """Create a ClaudeRunner instance."""
+        config = ClaudeConfig(
+            binary="claude",
+            timeout=60,
+            yolo=True,
+            projects={},
+        )
+        return ClaudeRunner(config)
+
+    @pytest.fixture
+    def mock_card(self):
+        """Create a mock TrelloCard."""
+        from trellm.trello import TrelloCard
+        return TrelloCard(
+            id="card123",
+            name="test card",
+            description="test description",
+            url="https://trello.com/c/test",
+            last_activity="2026-01-01T00:00:00Z",
+        )
+
+    @pytest.mark.asyncio
+    async def test_failure_with_empty_stderr_includes_stdout_error(self, runner, mock_card):
+        """When stderr is empty but stdout has JSON error info, include it in the error."""
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 1
+        mock_proc.communicate.return_value = (
+            b'{"type":"result","result":"Something went wrong with the task","session_id":"sess-123"}\n',
+            b"",
+        )
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            with pytest.raises(RuntimeError, match="Something went wrong"):
+                await runner._run_once(
+                    card=mock_card,
+                    project="test",
+                    working_dir="/tmp/test",
+                    session_id=None,
+                    prefix="[test] ",
+                )
+
+    @pytest.mark.asyncio
+    async def test_failure_with_stderr_still_includes_stderr(self, runner, mock_card):
+        """When stderr has content, it should still be included in the error."""
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 1
+        mock_proc.communicate.return_value = (
+            b'{"type":"result","result":"JSON error detail"}\n',
+            b"Some stderr error",
+        )
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            with pytest.raises(RuntimeError, match="Some stderr error"):
+                await runner._run_once(
+                    card=mock_card,
+                    project="test",
+                    working_dir="/tmp/test",
+                    session_id=None,
+                    prefix="[test] ",
+                )
+
+    @pytest.mark.asyncio
+    async def test_failure_with_empty_stderr_no_json_includes_stdout(self, runner, mock_card):
+        """When stderr is empty and stdout has no parseable JSON, include raw stdout."""
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 1
+        mock_proc.communicate.return_value = (
+            b"Some non-JSON output from claude",
+            b"",
+        )
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            with pytest.raises(RuntimeError, match="Some non-JSON output"):
+                await runner._run_once(
+                    card=mock_card,
+                    project="test",
+                    working_dir="/tmp/test",
+                    session_id=None,
+                    prefix="[test] ",
+                )
+
+    @pytest.mark.asyncio
+    async def test_failure_logs_stdout_on_error(self, runner, mock_card, caplog):
+        """When Claude Code fails, stdout should be logged for debugging."""
+        import logging
+
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 1
+        mock_proc.communicate.return_value = (
+            b'{"type":"result","result":"Task failed badly","session_id":"sess-456"}\n',
+            b"",
+        )
+
+        with caplog.at_level(logging.ERROR):
+            with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+                with pytest.raises(RuntimeError):
+                    await runner._run_once(
+                        card=mock_card,
+                        project="test",
+                        working_dir="/tmp/test",
+                        session_id=None,
+                        prefix="[test] ",
+                    )
+
+        log_messages = " ".join(r.message for r in caplog.records)
+        assert "stdout" in log_messages.lower() or "Task failed badly" in log_messages
+
+
 class TestClaudeRunnerCompact:
     """Tests for the /compact functionality."""
 

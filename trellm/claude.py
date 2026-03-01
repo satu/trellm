@@ -409,6 +409,39 @@ class ClaudeRunner:
                 reset_seconds=reset_seconds,
             )
 
+    def _extract_error_from_output(self, output: str) -> Optional[str]:
+        """Extract error details from Claude Code's JSON output.
+
+        When Claude Code fails, stdout may contain JSON with a "result" or
+        "error" field that describes what went wrong. This method extracts
+        that info for better error reporting.
+
+        Args:
+            output: The stdout from Claude Code
+
+        Returns:
+            The extracted error detail string, or None if not found.
+        """
+        if not output or not output.strip():
+            return None
+
+        for line in reversed(output.strip().split("\n")):
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            try:
+                data = json.loads(line)
+                if "result" in data and isinstance(data["result"], str):
+                    return data["result"]
+                if "error" in data and isinstance(data["error"], str):
+                    return data["error"]
+            except json.JSONDecodeError:
+                continue
+
+        # No JSON error found; return truncated raw output as fallback
+        truncated = output.strip()[:500]
+        return truncated if truncated else None
+
     def _parse_rate_limit_reset_time(self, text: str) -> Optional[int]:
         """Parse reset time from rate limit error message.
 
@@ -1021,10 +1054,27 @@ class ClaudeRunner:
 
             # Check for known recoverable errors, passing the session_id
             self._check_for_errors(stderr_output, output, session_id=failed_session_id)
-            # If not a known error, raise generic error
+
+            # Extract error details from JSON stdout for better reporting
+            error_detail = self._extract_error_from_output(output)
+
+            # If not a known error, raise with the best available info
             logger.error("Claude Code failed with return code %d", proc.returncode)
-            logger.error("stderr: %s", stderr_output)
-            raise RuntimeError(f"Claude Code failed: {stderr_output}")
+            if stderr_output:
+                logger.error("stderr: %s", stderr_output)
+            if output.strip():
+                logger.error("stdout: %s", output[:2000])
+
+            # Build informative error message
+            if stderr_output and error_detail:
+                msg = f"Claude Code failed: {stderr_output} (detail: {error_detail})"
+            elif stderr_output:
+                msg = f"Claude Code failed: {stderr_output}"
+            elif error_detail:
+                msg = f"Claude Code failed: {error_detail}"
+            else:
+                msg = f"Claude Code failed with return code {proc.returncode}"
+            raise RuntimeError(msg)
 
         # Parse JSON output
         return self._parse_output(output)
