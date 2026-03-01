@@ -7,8 +7,10 @@ from trellm.__main__ import (
     parse_project,
     is_stats_command,
     is_maintenance_command,
+    is_reset_session_command,
     handle_stats_command,
     handle_maintenance_command,
+    handle_reset_session_command,
 )
 from trellm.config import (
     Config,
@@ -497,4 +499,252 @@ class TestHandleMaintenanceCommand:
         assert result is True
         comment_arg = trello.add_comment.call_args[0][1]
         assert "/maintenance command completed" in comment_arg
+        assert "smugcoin" in comment_arg
+
+
+class TestIsResetSessionCommand:
+    """Tests for is_reset_session_command function."""
+
+    def test_reset_session_command_basic(self):
+        """Test basic /reset-session command detection."""
+        assert is_reset_session_command("project /reset-session")
+        assert is_reset_session_command("trellm /reset-session")
+        assert is_reset_session_command("jcapp /reset-session")
+
+    def test_reset_session_command_with_colon(self):
+        """Test /reset-session with project colon format."""
+        assert is_reset_session_command("project: /reset-session")
+
+    def test_reset_session_command_case_insensitive(self):
+        """Test /reset-session is case insensitive."""
+        assert is_reset_session_command("project /RESET-SESSION")
+        assert is_reset_session_command("project /Reset-Session")
+
+    def test_not_reset_session_command(self):
+        """Test regular cards are not detected as /reset-session."""
+        assert not is_reset_session_command("project Add reset feature")
+        assert not is_reset_session_command("trellm Fix bug")
+        assert not is_reset_session_command("project / reset-session")  # space breaks
+
+    def test_reset_session_not_after_project_name(self):
+        """Test /reset-session must appear immediately after project name."""
+        assert not is_reset_session_command("trellm problem with /reset-session")
+        assert not is_reset_session_command("project fix /reset-session issue")
+
+    def test_reset_session_with_valid_projects_filter(self):
+        """Test /reset-session with valid_projects filter."""
+        valid = {"trellm", "jcapp"}
+        assert is_reset_session_command("trellm /reset-session", valid)
+        assert is_reset_session_command("jcapp /reset-session", valid)
+        assert not is_reset_session_command("other /reset-session", valid)
+
+    def test_reset_session_single_word_not_matched(self):
+        """Test that single word cards are not matched."""
+        assert not is_reset_session_command("/reset-session")
+        assert not is_reset_session_command("project")
+
+    def test_reset_session_with_alias_in_valid_projects(self):
+        """Test /reset-session with aliases in valid_projects set."""
+        valid = {"smugcoin", "smg", "jcapp"}
+        assert is_reset_session_command("smg /reset-session", valid)
+        assert is_reset_session_command("smugcoin /reset-session", valid)
+
+
+class TestHandleResetSessionCommand:
+    """Tests for handle_reset_session_command function."""
+
+    def _create_test_config(self, project: str = "testproject", session_id: str = None) -> Config:
+        """Create a test configuration."""
+        return Config(
+            trello=TrelloConfig(
+                api_key="key",
+                api_token="token",
+                board_id="board",
+                todo_list_id="todo",
+                ready_to_try_list_id="ready",
+            ),
+            claude=ClaudeConfig(
+                binary="claude",
+                timeout=60,
+                projects={
+                    project: ProjectConfig(
+                        working_dir="/tmp/testproject",
+                        session_id=session_id,
+                    )
+                },
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_handle_reset_session_clears_state(self, tmp_path):
+        """Test /reset-session clears session from state."""
+        from trellm.state import StateManager
+
+        state_file = tmp_path / "state.json"
+        state = StateManager(str(state_file))
+        state.set_session("testproject", "old-session-123")
+        config = self._create_test_config("testproject")
+
+        card = TrelloCard(
+            id="reset-card-123",
+            name="testproject /reset-session",
+            url="https://trello.com/c/test",
+            description="",
+            last_activity="2026-01-24T10:00:00Z",
+        )
+
+        trello = MagicMock()
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+
+        result = await handle_reset_session_command(
+            card=card, trello=trello, state=state, config=config,
+        )
+
+        assert result is True
+        assert state.get_session("testproject") is None
+        trello.add_comment.assert_called_once()
+        comment_arg = trello.add_comment.call_args[0][1]
+        assert "/reset-session completed" in comment_arg
+        assert "Cleared session ID from state" in comment_arg
+        trello.move_to_ready.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_reset_session_no_existing_session(self, tmp_path):
+        """Test /reset-session when no session exists in state."""
+        from trellm.state import StateManager
+
+        state_file = tmp_path / "state.json"
+        state = StateManager(str(state_file))
+        config = self._create_test_config("testproject")
+
+        card = TrelloCard(
+            id="reset-card-123",
+            name="testproject /reset-session",
+            url="https://trello.com/c/test",
+            description="",
+            last_activity="2026-01-24T10:00:00Z",
+        )
+
+        trello = MagicMock()
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+
+        result = await handle_reset_session_command(
+            card=card, trello=trello, state=state, config=config,
+        )
+
+        assert result is True
+        comment_arg = trello.add_comment.call_args[0][1]
+        assert "No session ID was set in state" in comment_arg
+
+    @pytest.mark.asyncio
+    async def test_handle_reset_session_warns_about_config_session(self, tmp_path):
+        """Test /reset-session warns if session_id also in config."""
+        from trellm.state import StateManager
+
+        state_file = tmp_path / "state.json"
+        state = StateManager(str(state_file))
+        state.set_session("testproject", "state-session-123")
+        config = self._create_test_config("testproject", session_id="config-session-456")
+
+        card = TrelloCard(
+            id="reset-card-123",
+            name="testproject /reset-session",
+            url="https://trello.com/c/test",
+            description="",
+            last_activity="2026-01-24T10:00:00Z",
+        )
+
+        trello = MagicMock()
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+
+        result = await handle_reset_session_command(
+            card=card, trello=trello, state=state, config=config,
+        )
+
+        assert result is True
+        comment_arg = trello.add_comment.call_args[0][1]
+        assert "config-session-456" in comment_arg
+        assert "Remove it from the config" in comment_arg
+
+    @pytest.mark.asyncio
+    async def test_handle_reset_session_unknown_project(self, tmp_path):
+        """Test /reset-session for unknown project."""
+        from trellm.state import StateManager
+
+        state_file = tmp_path / "state.json"
+        state = StateManager(str(state_file))
+        config = self._create_test_config("otherproject")
+
+        card = TrelloCard(
+            id="reset-card-123",
+            name="unknownproject /reset-session",
+            url="https://trello.com/c/test",
+            description="",
+            last_activity="2026-01-24T10:00:00Z",
+        )
+
+        trello = MagicMock()
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+
+        result = await handle_reset_session_command(
+            card=card, trello=trello, state=state, config=config,
+        )
+
+        assert result is True
+        comment_arg = trello.add_comment.call_args[0][1]
+        assert "not found in configuration" in comment_arg
+
+    @pytest.mark.asyncio
+    async def test_handle_reset_session_with_alias(self, tmp_path):
+        """Test /reset-session command using a project alias."""
+        from trellm.state import StateManager
+
+        state_file = tmp_path / "state.json"
+        state = StateManager(str(state_file))
+        state.set_session("smugcoin", "old-session-xyz")
+
+        config = Config(
+            trello=TrelloConfig(
+                api_key="key",
+                api_token="token",
+                board_id="board",
+                todo_list_id="todo",
+                ready_to_try_list_id="ready",
+            ),
+            claude=ClaudeConfig(
+                binary="claude",
+                timeout=60,
+                projects={
+                    "smugcoin": ProjectConfig(
+                        working_dir="/tmp/smugcoin",
+                        aliases=["smg"],
+                    )
+                },
+            ),
+        )
+
+        card = TrelloCard(
+            id="reset-alias-123",
+            name="smg /reset-session",
+            url="https://trello.com/c/test",
+            description="",
+            last_activity="2026-01-24T10:00:00Z",
+        )
+
+        trello = MagicMock()
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+
+        result = await handle_reset_session_command(
+            card=card, trello=trello, state=state, config=config,
+        )
+
+        assert result is True
+        assert state.get_session("smugcoin") is None
+        comment_arg = trello.add_comment.call_args[0][1]
+        assert "/reset-session completed" in comment_arg
         assert "smugcoin" in comment_arg

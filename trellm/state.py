@@ -375,6 +375,29 @@ class StateManager:
             del session_data["ticket_count"]
         self._save()
 
+    def clear_session(self, project: str) -> bool:
+        """Clear the session ID for a project.
+
+        This removes the session_id from state, so the next run will start
+        a fresh session (or fall back to config file session_id if set).
+
+        Args:
+            project: Project name
+
+        Returns:
+            True if a session was cleared, False if no session existed.
+        """
+        sessions = self.state.get("sessions", {})
+        if project not in sessions:
+            return False
+        session = sessions[project]
+        if "session_id" not in session:
+            return False
+        old_session_id = session.pop("session_id")
+        self._save()
+        logger.info("Cleared session ID for project %s (was: %s)", project, old_session_id)
+        return True
+
     def get_last_maintenance(self, project: str) -> Optional[str]:
         """Get the last maintenance timestamp for a project."""
         session = self.state.get("sessions", {}).get(project)

@@ -73,6 +73,36 @@ def is_stats_command(card_name: str, valid_projects: set[str] | None = None) -> 
     return parts[1] == "/stats"
 
 
+def is_reset_session_command(card_name: str, valid_projects: set[str] | None = None) -> bool:
+    """Check if a card is a /reset-session command.
+
+    The /reset-session command must appear immediately after the project name:
+    - "project /reset-session" - valid
+    - "project: /reset-session" - valid
+
+    Args:
+        card_name: The card name to check
+        valid_projects: Optional set of valid project names. If provided,
+            only cards with a matching project name will be recognized.
+
+    Returns:
+        True if the card is a valid /reset-session command, False otherwise.
+    """
+    parts = card_name.lower().split()
+    if len(parts) < 2:
+        return False
+
+    # Extract project name (first word, strip colon)
+    project = parts[0].rstrip(":")
+
+    # Check if project is valid (if filter provided)
+    if valid_projects is not None and project not in valid_projects:
+        return False
+
+    # /reset-session must be the second word (immediately after project name)
+    return parts[1] == "/reset-session"
+
+
 def is_maintenance_command(card_name: str, valid_projects: set[str] | None = None) -> bool:
     """Check if a card is a /maintenance command.
 
@@ -148,6 +178,76 @@ async def handle_stats_command(
 
     except Exception as e:
         logger.error("Failed to handle /stats command for card %s: %s", card.id, e)
+        return False
+
+
+async def handle_reset_session_command(
+    card: TrelloCard,
+    trello: TrelloClient,
+    state: StateManager,
+    config: Config,
+) -> bool:
+    """Handle a /reset-session command card.
+
+    Clears the session ID for the specified project so the next task starts fresh.
+
+    Args:
+        card: The Trello card with the /reset-session command
+        trello: Trello client for API calls
+        state: State manager for state data
+        config: Application configuration
+
+    Returns:
+        True if handled successfully, False otherwise.
+    """
+    parsed_name = parse_project(card.name)
+    project = config.resolve_project(parsed_name)
+
+    if project is None:
+        error_msg = f"Claude: /reset-session command failed\n\nProject '{parsed_name}' not found in configuration."
+        await trello.add_comment(card.id, error_msg)
+        await trello.move_to_ready(card.id)
+        logger.warning("Reset-session command for unknown project: %s", parsed_name)
+        return True  # Card handled, just with an error
+
+    try:
+        # Clear session from state
+        had_state_session = state.clear_session(project)
+
+        # Check if there's also a session_id in config
+        config_session = config.get_initial_session_id(project)
+
+        # Build result message
+        parts = []
+        if had_state_session:
+            parts.append("Cleared session ID from state.")
+        else:
+            parts.append("No session ID was set in state.")
+
+        if config_session:
+            parts.append(
+                f"\n\n**Note:** Project '{project}' also has a session_id "
+                f"(`{config_session}`) in the config file. "
+                f"Remove it from the config to fully reset."
+            )
+
+        parts.append("\nThe next task will start a fresh session.")
+
+        comment = f"Claude: /reset-session completed for {project}\n\n" + " ".join(parts)
+        await trello.add_comment(card.id, comment)
+        await trello.move_to_ready(card.id)
+
+        logger.info("[%s] Session reset completed", project)
+        return True
+
+    except Exception as e:
+        logger.error("Failed to handle /reset-session command for card %s: %s", card.id, e)
+        try:
+            error_comment = f"Claude: /reset-session command failed\n\nError: {e}"
+            await trello.add_comment(card.id, error_comment)
+            await trello.move_to_ready(card.id)
+        except Exception:
+            pass
         return False
 
 
@@ -374,6 +474,20 @@ async def process_cards(
         if is_maintenance_command(card.name, config.get_all_project_names()):
             logger.info("Detected /maintenance command: %s", card.name)
             success = await handle_maintenance_command(
+                card=card,
+                trello=trello,
+                state=state,
+                config=config,
+            )
+            if success:
+                state.mark_processed(card.id)
+                processed_count += 1
+            continue
+
+        # Check for /reset-session command - handle directly without Claude
+        if is_reset_session_command(card.name, config.get_all_project_names()):
+            logger.info("Detected /reset-session command: %s", card.name)
+            success = await handle_reset_session_command(
                 card=card,
                 trello=trello,
                 state=state,
@@ -733,6 +847,21 @@ async def run_polling_loop(
                         logger.info("Detected /maintenance command: %s", card.name)
                         _processing_cards.add(card.id)
                         success = await handle_maintenance_command(
+                            card=card,
+                            trello=trello,
+                            state=state,
+                            config=current_config,
+                        )
+                        if success:
+                            state.mark_processed(card.id)
+                        _processing_cards.discard(card.id)
+                        continue
+
+                    # Check for /reset-session command
+                    if is_reset_session_command(card.name, current_config.get_all_project_names()):
+                        logger.info("Detected /reset-session command: %s", card.name)
+                        _processing_cards.add(card.id)
+                        success = await handle_reset_session_command(
                             card=card,
                             trello=trello,
                             state=state,

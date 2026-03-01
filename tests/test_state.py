@@ -74,6 +74,52 @@ class TestStateManager:
         manager.clear_processed("card123")
         assert not manager.is_processed("card123")
 
+    def test_clear_session(self, tmp_path):
+        """Test clearing session ID for a project."""
+        state_file = tmp_path / "state.json"
+        manager = StateManager(str(state_file))
+
+        manager.set_session("project1", "session-abc")
+        assert manager.get_session("project1") == "session-abc"
+
+        result = manager.clear_session("project1")
+        assert result is True
+        assert manager.get_session("project1") is None
+
+    def test_clear_session_nonexistent(self, tmp_path):
+        """Test clearing session for a project with no session."""
+        state_file = tmp_path / "state.json"
+        manager = StateManager(str(state_file))
+
+        result = manager.clear_session("nonexistent")
+        assert result is False
+
+    def test_clear_session_preserves_other_data(self, tmp_path):
+        """Test that clearing session preserves other session data."""
+        state_file = tmp_path / "state.json"
+        manager = StateManager(str(state_file))
+
+        manager.set_session("project1", "session-abc", last_card_id="card123")
+        manager.add_processed_ticket("project1", "card123")
+
+        manager.clear_session("project1")
+
+        # Session ID gone, but other data preserved
+        assert manager.get_session("project1") is None
+        assert manager.get_last_card_id("project1") == "card123"
+        assert manager.get_ticket_count("project1") == 1
+
+    def test_clear_session_persistence(self, tmp_path):
+        """Test that cleared session is persisted to file."""
+        state_file = tmp_path / "state.json"
+
+        manager1 = StateManager(str(state_file))
+        manager1.set_session("project1", "session-abc")
+        manager1.clear_session("project1")
+
+        manager2 = StateManager(str(state_file))
+        assert manager2.get_session("project1") is None
+
     def test_should_reprocess(self, tmp_path):
         """Test reprocess detection."""
         state_file = tmp_path / "state.json"
