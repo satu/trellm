@@ -98,6 +98,28 @@ class TestClaudeRunner:
         assert "abc123" in prompt
         assert "Description:" not in prompt
 
+    def test_build_prompt_includes_tdd_instructions(self):
+        """Test that prompt includes red/green TDD instructions."""
+        config = ClaudeConfig()
+        runner = ClaudeRunner(config)
+
+        card = TrelloCard(
+            id="abc123",
+            name="test card",
+            description="",
+            url="https://trello.com/c/abc123",
+            last_activity="2026-01-08T12:00:00Z",
+        )
+
+        prompt = runner._build_prompt(card)
+
+        # Should include TDD workflow instructions
+        assert "TDD" in prompt or "test-driven" in prompt.lower()
+        assert "red" in prompt.lower()
+        assert "green" in prompt.lower()
+        # Should mention writing tests first
+        assert "failing test" in prompt.lower() or "write a test" in prompt.lower() or "write test" in prompt.lower()
+
     def test_build_prompt_includes_github_commit_link_requirement(self):
         """Test that prompt requires GitHub links for commit mentions."""
         config = ClaudeConfig()

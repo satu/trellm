@@ -1140,6 +1140,7 @@ Important guidelines:
 - As soon as you start working, add a comment starting with "Claude:" acknowledging you've started
 - Read and understand existing code before making changes
 - Write clean, maintainable code following the project's style
+- Follow red/green TDD: write a failing test first, then implement the minimal code to make it pass, then refactor if needed. Repeat for each change.
 - Add tests when appropriate
 - Commit with a clear, descriptive message
 - Push your changes to the remote repository
