@@ -9,6 +9,7 @@ from typing import Optional
 
 from aiohttp import web
 
+from ..claude import fetch_claude_usage_limits
 from ..config import Config
 from ..state import StateManager
 
@@ -156,6 +157,35 @@ class WebServer:
         global_stats = self.state.get_stats()
         last_30 = self.state.get_stats_for_period(30)
 
+        # Fetch real-time Claude usage limits (blocking call, run in executor)
+        loop = asyncio.get_event_loop()
+        usage_limits = await loop.run_in_executor(None, fetch_claude_usage_limits)
+
+        usage_data = {}
+        if usage_limits.error:
+            usage_data["error"] = usage_limits.error
+        else:
+            if usage_limits.five_hour:
+                usage_data["five_hour"] = {
+                    "utilization": usage_limits.five_hour.utilization,
+                    "resets_at": usage_limits.five_hour.format_reset_time(),
+                }
+            if usage_limits.seven_day:
+                usage_data["seven_day"] = {
+                    "utilization": usage_limits.seven_day.utilization,
+                    "resets_at": usage_limits.seven_day.format_reset_time(),
+                }
+            if usage_limits.seven_day_opus and usage_limits.seven_day_opus.utilization > 0:
+                usage_data["seven_day_opus"] = {
+                    "utilization": usage_limits.seven_day_opus.utilization,
+                    "resets_at": usage_limits.seven_day_opus.format_reset_time(),
+                }
+            if usage_limits.seven_day_sonnet and usage_limits.seven_day_sonnet.utilization > 0:
+                usage_data["seven_day_sonnet"] = {
+                    "utilization": usage_limits.seven_day_sonnet.utilization,
+                    "resets_at": usage_limits.seven_day_sonnet.format_reset_time(),
+                }
+
         # Per-project stats
         by_project = {}
         for name in self.config.claude.projects:
@@ -176,6 +206,7 @@ class WebServer:
         recent_history = history[-20:] if history else []
 
         data = {
+            "usage_limits": usage_data,
             "global": {
                 "total_cost_dollars": global_stats.total_cost_dollars,
                 "total_tickets": global_stats.total_tickets,

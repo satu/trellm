@@ -2,14 +2,24 @@
 
 import asyncio
 import time
+from unittest.mock import patch
 
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import AioHTTPTestCase, TestClient, TestServer
 
+from trellm.claude import ClaudeUsageLimits, UsageLimitInfo
 from trellm.config import Config, TrelloConfig, ClaudeConfig, ProjectConfig, WebConfig
 from trellm.state import StateManager
 from trellm.web.server import WebServer
+
+
+def _mock_usage_limits():
+    """Return mock usage limits for testing."""
+    return ClaudeUsageLimits(
+        five_hour=UsageLimitInfo(utilization=42.5),
+        seven_day=UsageLimitInfo(utilization=15.0),
+    )
 
 
 def _make_config(**overrides) -> Config:
@@ -50,6 +60,13 @@ def _make_web_server(config, state) -> WebServer:
         processing_cards=set(),
         start_time=time.time() - 120,  # 2 minutes ago
     )
+
+
+@pytest.fixture(autouse=True)
+def mock_usage_limits():
+    """Mock fetch_claude_usage_limits for all tests."""
+    with patch("trellm.web.server.fetch_claude_usage_limits", return_value=_mock_usage_limits()):
+        yield
 
 
 @pytest.fixture
@@ -172,6 +189,23 @@ class TestWebServerStats:
         assert "last_30_days" in data
         assert "by_project" in data
         assert "recent_history" in data
+        assert "usage_limits" in data
+
+    async def test_stats_usage_limits(self, client):
+        resp = await client.get("/api/stats")
+        data = await resp.json()
+        ul = data["usage_limits"]
+        assert "five_hour" in ul
+        assert ul["five_hour"]["utilization"] == 42.5
+        assert "seven_day" in ul
+        assert ul["seven_day"]["utilization"] == 15.0
+
+    async def test_stats_usage_limits_error(self, client):
+        with patch("trellm.web.server.fetch_claude_usage_limits",
+                    return_value=ClaudeUsageLimits(error="No token")):
+            resp = await client.get("/api/stats")
+            data = await resp.json()
+            assert data["usage_limits"]["error"] == "No token"
 
     async def test_stats_global_fields(self, client):
         resp = await client.get("/api/stats")

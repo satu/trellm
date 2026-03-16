@@ -188,6 +188,46 @@ td a:hover {
     gap: 12px;
 }
 
+.usage-item {
+    margin-bottom: 10px;
+}
+
+.usage-header {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 4px;
+}
+
+.usage-header .label {
+    font-size: 0.8rem;
+    color: #8b949e;
+}
+
+.usage-header .value {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #f0f6fc;
+}
+
+.usage-bar-bg {
+    height: 8px;
+    background: #21262d;
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.usage-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.3s ease;
+}
+
+.usage-reset {
+    font-size: 0.7rem;
+    color: #484f58;
+    margin-top: 2px;
+}
+
 footer {
     text-align: center;
     padding: 12px;

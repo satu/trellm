@@ -111,6 +111,30 @@
         return '<div class="stat"><span class="label">' + label + '</span><span class="value">' + value + '</span></div>';
     }
 
+    function usageBar(label, pct, resetsAt) {
+        var color = pct < 60 ? "#238636" : pct < 85 ? "#d29922" : "#da3633";
+        return '<div class="usage-item">' +
+            '<div class="usage-header"><span class="label">' + label + '</span><span class="value">' + Math.round(pct) + '%</span></div>' +
+            '<div class="usage-bar-bg"><div class="usage-bar-fill" style="width:' + Math.min(pct, 100) + '%;background:' + color + '"></div></div>' +
+            (resetsAt ? '<div class="usage-reset">resets ' + resetsAt + '</div>' : '') +
+            '</div>';
+    }
+
+    function renderUsageLimits(data) {
+        var el = document.getElementById("usage-limits");
+        var ul = data.usage_limits;
+        if (!ul || ul.error) {
+            el.innerHTML = '<div class="empty-state">' + (ul && ul.error ? escapeHtml(ul.error) : "Unavailable") + '</div>';
+            return;
+        }
+        var html = "";
+        if (ul.five_hour) html += usageBar("5-Hour Session", ul.five_hour.utilization, ul.five_hour.resets_at);
+        if (ul.seven_day) html += usageBar("7-Day Weekly", ul.seven_day.utilization, ul.seven_day.resets_at);
+        if (ul.seven_day_opus) html += usageBar("7-Day Opus", ul.seven_day_opus.utilization, ul.seven_day_opus.resets_at);
+        if (ul.seven_day_sonnet) html += usageBar("7-Day Sonnet", ul.seven_day_sonnet.utilization, ul.seven_day_sonnet.resets_at);
+        el.innerHTML = html || '<div class="empty-state">No usage data</div>';
+    }
+
     function renderStats(data) {
         renderStatsBlock("stats-global", data.global);
         renderStatsBlock("stats-last30", data.last_30_days);
@@ -167,6 +191,7 @@
             renderStatus(status);
             renderTasks(tasks);
             renderProjects(projects);
+            renderUsageLimits(stats);
             renderStats(stats);
             renderHistory(stats);
         } catch (e) {
