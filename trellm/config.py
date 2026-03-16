@@ -56,6 +56,15 @@ class ClaudeConfig:
 
 
 @dataclass
+class WebConfig:
+    """Web dashboard configuration."""
+
+    enabled: bool = False
+    host: str = "0.0.0.0"
+    port: int = 8077
+
+
+@dataclass
 class Config:
     """Main configuration."""
 
@@ -63,6 +72,7 @@ class Config:
     claude: ClaudeConfig
     poll_interval: int = 5
     state_file: str = "~/.trellm/state.json"
+    web: WebConfig = field(default_factory=WebConfig)
 
     def get_working_dir(self, project: str) -> Optional[str]:
         """Get working directory for a project."""
@@ -195,9 +205,18 @@ def load_config(config_path: Optional[str] = None) -> Config:
         maintenance=global_maintenance,
     )
 
+    # Build web config
+    web_data = data.get("web", {})
+    web = WebConfig(
+        enabled=web_data.get("enabled", False),
+        host=web_data.get("host", "0.0.0.0"),
+        port=web_data.get("port", 8077),
+    )
+
     return Config(
         trello=trello,
         claude=claude,
         poll_interval=polling_data.get("interval_seconds", 5),
         state_file=state_data.get("file", "~/.trellm/state.json"),
+        web=web,
     )

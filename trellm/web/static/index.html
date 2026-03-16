@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TreLLM Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header>
+        <h1>TreLLM Dashboard</h1>
+        <div id="status-badge" class="badge">loading...</div>
+    </header>
+
+    <main>
+        <section id="status-section" class="card">
+            <h2>Status</h2>
+            <div class="status-grid">
+                <div class="stat">
+                    <span class="label">Uptime</span>
+                    <span id="uptime" class="value">-</span>
+                </div>
+                <div class="stat">
+                    <span class="label">Poll Interval</span>
+                    <span id="poll-interval" class="value">-</span>
+                </div>
+                <div class="stat">
+                    <span class="label">Active Tasks</span>
+                    <span id="active-tasks" class="value">-</span>
+                </div>
+                <div class="stat">
+                    <span class="label">Projects</span>
+                    <span id="project-count" class="value">-</span>
+                </div>
+            </div>
+        </section>
+
+        <section id="tasks-section" class="card">
+            <h2>Running Tasks</h2>
+            <div id="tasks-empty" class="empty-state">No tasks running</div>
+            <table id="tasks-table" class="hidden">
+                <thead>
+                    <tr>
+                        <th>Project</th>
+                        <th>Card</th>
+                        <th>Duration</th>
+                    </tr>
+                </thead>
+                <tbody id="tasks-body"></tbody>
+            </table>
+        </section>
+
+        <section id="projects-section" class="card">
+            <h2>Projects</h2>
+            <div id="projects-list"></div>
+        </section>
+
+        <section id="stats-section" class="card">
+            <h2>Stats</h2>
+            <div class="stats-tabs">
+                <button class="tab active" data-tab="global">All-Time</button>
+                <button class="tab" data-tab="last30">Last 30 Days</button>
+                <button class="tab" data-tab="by-project">By Project</button>
+            </div>
+            <div id="stats-global" class="tab-content active"></div>
+            <div id="stats-last30" class="tab-content"></div>
+            <div id="stats-by-project" class="tab-content"></div>
+        </section>
+
+        <section id="history-section" class="card">
+            <h2>Recent History</h2>
+            <table id="history-table">
+                <thead>
+                    <tr>
+                        <th>Project</th>
+                        <th>Cost</th>
+                        <th>Duration</th>
+                        <th>Changes</th>
+                        <th>When</th>
+                    </tr>
+                </thead>
+                <tbody id="history-body"></tbody>
+            </table>
+        </section>
+    </main>
+
+    <footer>
+        <span>Auto-refresh: <span id="refresh-countdown">5</span>s</span>
+    </footer>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

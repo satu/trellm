@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from collections import defaultdict
 from dataclasses import asdict
 from typing import Optional
@@ -14,6 +15,7 @@ from .config import Config, load_config
 from .maintenance import run_maintenance, should_run_maintenance
 from .state import StateManager
 from .trello import TrelloClient, TrelloCard
+from .web.server import WebServer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,6 +31,9 @@ _processing_cards: set[str] = set()
 
 # Track running tasks for cleanup
 _running_tasks: set[asyncio.Task] = set()
+
+# Web server instance (set when web dashboard is enabled)
+_web_server: Optional[WebServer] = None
 
 
 def parse_project(card_name: str) -> str:
@@ -835,6 +840,10 @@ async def process_card_for_project(
             card.name,
         )
 
+        # Track task in web dashboard
+        if _web_server:
+            _web_server.track_task(card.id, project, card.name, card.url)
+
         # Get session ID and last card ID for this project
         session_id = state.get_session(project)
         if not session_id:
@@ -929,6 +938,8 @@ async def process_card_for_project(
         finally:
             # Always remove from processing set when done
             _processing_cards.discard(card.id)
+            if _web_server:
+                _web_server.untrack_task(card.id)
 
 
 def _task_done_callback(task: asyncio.Task) -> None:
@@ -954,6 +965,8 @@ async def run_polling_loop(
     Tasks are spawned in the background and polling continues while they run.
     Per-project locks ensure only one task runs per project at a time.
     """
+    global _web_server
+
     trello = TrelloClient(config.trello)
     state = StateManager(config.state_file)
     claude = ClaudeRunner(
@@ -965,6 +978,17 @@ async def run_polling_loop(
     # Track current config and last processed card for reload notifications
     current_config = config
     last_processed_card_id: Optional[str] = None
+
+    # Start web dashboard if enabled
+    if config.web.enabled:
+        _web_server = WebServer(
+            config=config,
+            state=state,
+            running_tasks=_running_tasks,
+            processing_cards=_processing_cards,
+            start_time=time.time(),
+        )
+        await _web_server.start()
 
     logger.info("TreLLM started, polling every %d seconds", config.poll_interval)
 
@@ -1003,6 +1027,8 @@ async def run_polling_loop(
                                 "Failed to add config reload comment: %s", e
                             )
 
+                    if _web_server:
+                        _web_server.update_config(new_config)
                     current_config = new_config
 
             except Exception as e:
@@ -1156,6 +1182,9 @@ async def run_polling_loop(
             task.cancel()
         if _running_tasks:
             await asyncio.gather(*_running_tasks, return_exceptions=True)
+        if _web_server:
+            await _web_server.stop()
+            _web_server = None
         await trello.close()
 
 
