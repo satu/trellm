@@ -228,6 +228,30 @@ td a:hover {
     margin-top: 2px;
 }
 
+.section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+}
+
+.section-header h2 {
+    margin-bottom: 0;
+}
+
+.btn-small {
+    padding: 4px 12px;
+    font-size: 0.75rem;
+    background: #21262d;
+    color: #8b949e;
+    border: 1px solid #30363d;
+}
+
+.btn-small:hover {
+    color: #f0f6fc;
+    border-color: #58a6ff;
+}
+
 .controls {
     display: flex;
     gap: 12px;

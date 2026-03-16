@@ -950,6 +950,9 @@ def _task_done_callback(task: asyncio.Task) -> None:
         if isinstance(result, str):  # Card ID returned on success
             # Store for config reload notifications (best effort)
             task._last_processed_card_id = result  # type: ignore[attr-defined]
+            # Refresh usage limits in web dashboard after ticket completion
+            if _web_server:
+                asyncio.ensure_future(_web_server.refresh_usage_limits())
     except Exception:
         # Task failed, already logged in process_card_for_project
         pass
@@ -1006,6 +1009,8 @@ async def run_polling_loop(
 
         _web_server.set_callbacks(on_abort=_web_abort, on_restart=_web_restart)
         await _web_server.start()
+        # Fetch initial usage limits
+        await _web_server.refresh_usage_limits()
 
     logger.info("TreLLM started, polling every %d seconds", config.poll_interval)
 

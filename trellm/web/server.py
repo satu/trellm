@@ -39,6 +39,8 @@ class WebServer:
         self._task_info: dict[str, dict] = {}  # task_id -> {project, card_name, card_url, started_at}
         self._on_abort: Optional[Callable[[], asyncio.Future]] = None
         self._on_restart: Optional[Callable[[], asyncio.Future]] = None
+        self._usage_cache: Optional[dict] = None  # Cached usage limits data
+        self._usage_cache_time: float = 0  # When cache was last updated
 
     def track_task(self, card_id: str, project: str, card_name: str, card_url: str) -> None:
         """Register a task for dashboard visibility."""
@@ -62,6 +64,47 @@ class WebServer:
         self._on_abort = on_abort
         self._on_restart = on_restart
 
+    async def refresh_usage_limits(self) -> None:
+        """Fetch and cache Claude usage limits. Called after ticket completion."""
+        try:
+            loop = asyncio.get_event_loop()
+            usage_limits = await loop.run_in_executor(None, fetch_claude_usage_limits)
+            self._usage_cache = self._format_usage_data(usage_limits)
+            self._usage_cache_time = time.time()
+        except Exception as e:
+            logger.warning("Failed to refresh usage limits: %s", e)
+            self._usage_cache = {"error": str(e)}
+            self._usage_cache_time = time.time()
+
+    @staticmethod
+    def _format_usage_data(usage_limits) -> dict:
+        """Format usage limits into JSON-serializable dict."""
+        data: dict = {}
+        if usage_limits.error:
+            data["error"] = usage_limits.error
+            return data
+        if usage_limits.five_hour:
+            data["five_hour"] = {
+                "utilization": usage_limits.five_hour.utilization,
+                "resets_at": usage_limits.five_hour.format_reset_time(),
+            }
+        if usage_limits.seven_day:
+            data["seven_day"] = {
+                "utilization": usage_limits.seven_day.utilization,
+                "resets_at": usage_limits.seven_day.format_reset_time(),
+            }
+        if usage_limits.seven_day_opus and usage_limits.seven_day_opus.utilization > 0:
+            data["seven_day_opus"] = {
+                "utilization": usage_limits.seven_day_opus.utilization,
+                "resets_at": usage_limits.seven_day_opus.format_reset_time(),
+            }
+        if usage_limits.seven_day_sonnet and usage_limits.seven_day_sonnet.utilization > 0:
+            data["seven_day_sonnet"] = {
+                "utilization": usage_limits.seven_day_sonnet.utilization,
+                "resets_at": usage_limits.seven_day_sonnet.format_reset_time(),
+            }
+        return data
+
     def update_config(self, config: Config) -> None:
         """Update config reference after hot reload."""
         self.config = config
@@ -74,6 +117,7 @@ class WebServer:
         app.router.add_get("/api/stats", self._handle_stats)
         app.router.add_post("/api/abort", self._handle_abort)
         app.router.add_post("/api/restart", self._handle_restart)
+        app.router.add_post("/api/usage/refresh", self._handle_usage_refresh)
         # Serve static files (index.html at root)
         app.router.add_get("/", self._handle_index)
         app.router.add_static("/static", STATIC_DIR, show_index=False)
@@ -170,34 +214,8 @@ class WebServer:
         global_stats = self.state.get_stats()
         last_30 = self.state.get_stats_for_period(30)
 
-        # Fetch real-time Claude usage limits (blocking call, run in executor)
-        loop = asyncio.get_event_loop()
-        usage_limits = await loop.run_in_executor(None, fetch_claude_usage_limits)
-
-        usage_data = {}
-        if usage_limits.error:
-            usage_data["error"] = usage_limits.error
-        else:
-            if usage_limits.five_hour:
-                usage_data["five_hour"] = {
-                    "utilization": usage_limits.five_hour.utilization,
-                    "resets_at": usage_limits.five_hour.format_reset_time(),
-                }
-            if usage_limits.seven_day:
-                usage_data["seven_day"] = {
-                    "utilization": usage_limits.seven_day.utilization,
-                    "resets_at": usage_limits.seven_day.format_reset_time(),
-                }
-            if usage_limits.seven_day_opus and usage_limits.seven_day_opus.utilization > 0:
-                usage_data["seven_day_opus"] = {
-                    "utilization": usage_limits.seven_day_opus.utilization,
-                    "resets_at": usage_limits.seven_day_opus.format_reset_time(),
-                }
-            if usage_limits.seven_day_sonnet and usage_limits.seven_day_sonnet.utilization > 0:
-                usage_data["seven_day_sonnet"] = {
-                    "utilization": usage_limits.seven_day_sonnet.utilization,
-                    "resets_at": usage_limits.seven_day_sonnet.format_reset_time(),
-                }
+        # Use cached usage limits (refreshed after ticket completion or manually)
+        usage_data = self._usage_cache or {}
 
         # Per-project stats
         by_project = {}
@@ -264,6 +282,13 @@ class WebServer:
             return web.json_response(
                 {"error": str(e)}, status=500,
             )
+
+    async def _handle_usage_refresh(self, request: web.Request) -> web.Response:
+        await self.refresh_usage_limits()
+        return web.json_response({
+            "success": True,
+            "usage_limits": self._usage_cache or {},
+        })
 
     async def _handle_restart(self, request: web.Request) -> web.Response:
         if not self._on_restart:

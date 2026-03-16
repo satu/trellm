@@ -191,18 +191,27 @@ class TestWebServerStats:
         assert "recent_history" in data
         assert "usage_limits" in data
 
-    async def test_stats_usage_limits(self, client):
+    async def test_stats_usage_limits_empty_by_default(self, client):
         resp = await client.get("/api/stats")
         data = await resp.json()
-        ul = data["usage_limits"]
-        assert "five_hour" in ul
-        assert ul["five_hour"]["utilization"] == 42.5
-        assert "seven_day" in ul
-        assert ul["seven_day"]["utilization"] == 15.0
+        assert data["usage_limits"] == {}
 
-    async def test_stats_usage_limits_error(self, client):
+    async def test_stats_usage_limits_after_refresh(self, web_server):
+        await web_server.refresh_usage_limits()
+        app = web_server._create_app()
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/stats")
+            data = await resp.json()
+            ul = data["usage_limits"]
+            assert ul["five_hour"]["utilization"] == 42.5
+            assert ul["seven_day"]["utilization"] == 15.0
+
+    async def test_stats_usage_limits_error(self, web_server):
         with patch("trellm.web.server.fetch_claude_usage_limits",
                     return_value=ClaudeUsageLimits(error="No token")):
+            await web_server.refresh_usage_limits()
+        app = web_server._create_app()
+        async with TestClient(TestServer(app)) as client:
             resp = await client.get("/api/stats")
             data = await resp.json()
             assert data["usage_limits"]["error"] == "No token"
@@ -261,6 +270,32 @@ class TestWebServerTrackTask:
         new_config = _make_config(poll_interval=30)
         web_server.update_config(new_config)
         assert web_server.config.poll_interval == 30
+
+
+class TestWebServerUsageRefresh:
+    """Tests for POST /api/usage/refresh endpoint."""
+
+    async def test_usage_refresh(self, client):
+        resp = await client.post("/api/usage/refresh")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["success"] is True
+        assert "usage_limits" in data
+        assert data["usage_limits"]["five_hour"]["utilization"] == 42.5
+
+    async def test_usage_refresh_updates_cache(self, web_server):
+        app = web_server._create_app()
+        async with TestClient(TestServer(app)) as client:
+            # Initially empty
+            resp = await client.get("/api/stats")
+            data = await resp.json()
+            assert data["usage_limits"] == {}
+
+            # After refresh
+            await client.post("/api/usage/refresh")
+            resp = await client.get("/api/stats")
+            data = await resp.json()
+            assert data["usage_limits"]["five_hour"]["utilization"] == 42.5
 
 
 class TestWebServerAbort:

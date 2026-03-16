@@ -224,6 +224,24 @@
         setTimeout(function() { el.classList.add("hidden"); }, 5000);
     }
 
+    window.refreshUsage = function() {
+        var btn = document.getElementById("btn-refresh-usage");
+        btn.disabled = true;
+        btn.textContent = "Refreshing...";
+        fetch("/api/usage/refresh", { method: "POST" })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.success && data.usage_limits) {
+                    renderUsageLimits({ usage_limits: data.usage_limits });
+                }
+            })
+            .catch(function() {})
+            .finally(function() {
+                btn.disabled = false;
+                btn.textContent = "Refresh";
+            });
+    };
+
     window.confirmAbort = function() {
         if (!confirm("Abort all running tasks? This will cancel all in-progress work.")) return;
         document.getElementById("btn-abort").disabled = true;
