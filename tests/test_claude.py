@@ -141,6 +141,25 @@ class TestClaudeRunner:
         assert "GitHub link" in prompt
         assert "git remote get-url origin" in prompt
 
+    def test_build_prompt_prevents_parallel_subagents(self):
+        """Test that prompt instructs Claude to run subagents sequentially."""
+        config = ClaudeConfig()
+        runner = ClaudeRunner(config)
+
+        card = TrelloCard(
+            id="abc123",
+            name="test card",
+            description="",
+            url="https://trello.com/c/abc123",
+            last_activity="2026-01-08T12:00:00Z",
+        )
+
+        prompt = runner._build_prompt(card)
+
+        # Should include instruction to run subagents sequentially
+        assert "sequentially" in prompt.lower() or "sequential" in prompt.lower()
+        assert "parallel" in prompt.lower()
+
     def test_parse_output_with_session_id(self):
         """Test parsing output with session ID."""
         config = ClaudeConfig()

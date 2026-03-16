@@ -1232,7 +1232,10 @@ Voice note handling:
 - If voice notes exist, check comments to see if they've already been transcribed (look for "Transcribed: [filename]" in comments)
 - For any new/untranscribed voice notes: download the file, transcribe it, and add a comment with the transcription like "Claude: Transcribed: [filename]\\n[transcription content]"
 - If this is a new card with a voice note and minimal description, update the card name and description based on your understanding of the transcribed voice note. IMPORTANT: Always preserve the first word of the existing card name (this is the project name)
-- Process the transcribed instructions along with any other card content"""
+- Process the transcribed instructions along with any other card content
+
+Execution constraints:
+- Always run subagents sequentially. Do not use parallel subagent or Task execution."""
 
     def _parse_output(self, output: str) -> ClaudeResult:
         """Parse Claude Code's JSON output.
