@@ -342,6 +342,40 @@ td a:hover {
     background: #161b22;
 }
 
+.config-panel {
+    background: #0d1117;
+    border: 1px solid #21262d;
+    border-radius: 6px;
+    padding: 12px;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 0.8rem;
+    line-height: 1.6;
+    color: #c9d1d9;
+    max-height: 400px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.sortable {
+    cursor: pointer;
+    user-select: none;
+}
+
+.sortable:hover {
+    color: #58a6ff;
+}
+
+.sortable.asc::after {
+    content: " \25b2";
+    font-size: 0.6rem;
+}
+
+.sortable.desc::after {
+    content: " \25bc";
+    font-size: 0.6rem;
+}
+
 footer {
     text-align: center;
     padding: 12px;

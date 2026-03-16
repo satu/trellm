@@ -144,6 +144,7 @@ class WebServer:
         app.router.add_post("/api/restart", self._handle_restart)
         app.router.add_post("/api/usage/refresh", self._handle_usage_refresh)
         app.router.add_get("/api/stream/{card_id}", self._handle_stream)
+        app.router.add_get("/api/config", self._handle_config)
         # Serve static files (index.html at root)
         app.router.add_get("/", self._handle_index)
         app.router.add_static("/static", STATIC_DIR, show_index=False)
@@ -375,3 +376,56 @@ class WebServer:
                 subscribers.remove(queue)
 
         return response
+
+    @staticmethod
+    def _mask_secret(value: str) -> str:
+        """Mask a secret string, showing only first 4 chars."""
+        if not value or len(value) <= 4:
+            return "***"
+        return value[:4] + "***"
+
+    async def _handle_config(self, request: web.Request) -> web.Response:
+        cfg = self.config
+        projects = {}
+        for name, proj in cfg.claude.projects.items():
+            proj_data: dict = {
+                "working_dir": proj.working_dir,
+                "aliases": proj.aliases,
+            }
+            if proj.compact_prompt:
+                proj_data["compact_prompt"] = proj.compact_prompt
+            if proj.maintenance:
+                proj_data["maintenance"] = {
+                    "enabled": proj.maintenance.enabled,
+                    "interval": proj.maintenance.interval,
+                }
+            projects[name] = proj_data
+
+        claude_data: dict = {
+            "binary": cfg.claude.binary,
+            "timeout": cfg.claude.timeout,
+            "yolo": cfg.claude.yolo,
+            "projects": projects,
+        }
+        if cfg.claude.maintenance:
+            claude_data["maintenance"] = {
+                "enabled": cfg.claude.maintenance.enabled,
+                "interval": cfg.claude.maintenance.interval,
+            }
+
+        data = {
+            "trello": {
+                "api_key": self._mask_secret(cfg.trello.api_key),
+                "api_token": self._mask_secret(cfg.trello.api_token),
+                "board_id": cfg.trello.board_id,
+                "todo_list_id": cfg.trello.todo_list_id,
+            },
+            "claude": claude_data,
+            "web": {
+                "enabled": cfg.web.enabled,
+                "host": cfg.web.host,
+                "port": cfg.web.port,
+            },
+            "poll_interval": cfg.poll_interval,
+        }
+        return web.json_response(data)

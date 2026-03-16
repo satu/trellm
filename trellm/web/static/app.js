@@ -6,6 +6,9 @@
     let timer = null;
     let activeStream = null;  // Current EventSource for live output
     let activeCardId = null;  // Card ID being streamed
+    let historyData = [];     // Cached history data for sorting
+    let historySortKey = "when";
+    let historySortAsc = false;
 
     async function fetchJSON(url) {
         const resp = await fetch(url);
@@ -166,19 +169,55 @@
         }).join("");
     }
 
+    function formatTokens(n) {
+        if (!n) return "0";
+        if (n >= 1000000) return (n / 1000000).toFixed(1) + "M";
+        if (n >= 1000) return (n / 1000).toFixed(1) + "K";
+        return "" + n;
+    }
+
     function renderHistory(data) {
+        historyData = (data.recent_history || []).slice().reverse();
+        renderHistoryTable();
+    }
+
+    function renderHistoryTable() {
         var tbody = document.getElementById("history-body");
-        var entries = (data.recent_history || []).slice().reverse();
-        if (entries.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No history</td></tr>';
+        if (historyData.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No history</td></tr>';
             return;
         }
-        tbody.innerHTML = entries.map(function(h) {
+
+        var sorted = historyData.slice();
+        sorted.sort(function(a, b) {
+            var va, vb;
+            switch (historySortKey) {
+                case "project": va = a.project || ""; vb = b.project || ""; break;
+                case "cost": va = a.cost_cents || 0; vb = b.cost_cents || 0; break;
+                case "duration": va = a.wall_duration_seconds || 0; vb = b.wall_duration_seconds || 0; break;
+                case "when": va = a.processed_at || ""; vb = b.processed_at || ""; break;
+                default: return 0;
+            }
+            if (va < vb) return historySortAsc ? -1 : 1;
+            if (va > vb) return historySortAsc ? 1 : -1;
+            return 0;
+        });
+
+        // Update sort indicators
+        document.querySelectorAll("#history-table .sortable").forEach(function(th) {
+            th.classList.remove("asc", "desc");
+            if (th.getAttribute("data-sort") === historySortKey) {
+                th.classList.add(historySortAsc ? "asc" : "desc");
+            }
+        });
+
+        tbody.innerHTML = sorted.map(function(h) {
             var cost = "$" + (h.cost_cents / 100).toFixed(2);
             var dur = formatDuration(h.wall_duration_seconds || 0);
             var changes = "+" + (h.lines_added || 0) + " -" + (h.lines_removed || 0);
+            var tokens = formatTokens((h.input_tokens || 0) + (h.output_tokens || 0));
             var when = formatTime(h.processed_at);
-            return '<tr><td>' + escapeHtml(h.project) + '</td><td>' + cost + '</td><td>' + dur + '</td><td>' + changes + '</td><td>' + when + '</td></tr>';
+            return '<tr><td>' + escapeHtml(h.project) + '</td><td>' + cost + '</td><td>' + dur + '</td><td>' + changes + '</td><td>' + tokens + '</td><td>' + when + '</td></tr>';
         }).join("");
     }
 
@@ -307,6 +346,16 @@
         };
     };
 
+    window.sortHistory = function(key) {
+        if (historySortKey === key) {
+            historySortAsc = !historySortAsc;
+        } else {
+            historySortKey = key;
+            historySortAsc = true;
+        }
+        renderHistoryTable();
+    };
+
     window.closeOutput = function() {
         if (activeStream) {
             activeStream.close();
@@ -343,7 +392,18 @@
         }
     }
 
+    // Load config once (doesn't change often)
+    async function loadConfig() {
+        try {
+            var data = await fetchJSON("/api/config");
+            document.getElementById("config-content").textContent = JSON.stringify(data, null, 2);
+        } catch (e) {
+            document.getElementById("config-content").textContent = "Failed to load config";
+        }
+    }
+
     // Initial load
     refresh();
+    loadConfig();
     timer = setInterval(tick, 1000);
 })();

@@ -503,3 +503,46 @@ class TestWebServerSSEStream:
         async with TestClient(TestServer(app)) as client:
             resp = await client.get("/api/stream/nonexistent")
             assert resp.status == 404
+
+
+class TestWebServerConfigViewer:
+    """Tests for config viewer endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_config_endpoint_exists(self, client):
+        resp = await client.get("/api/config")
+        assert resp.status == 200
+        data = await resp.json()
+        assert "trello" in data
+        assert "claude" in data
+        assert "web" in data
+
+    @pytest.mark.asyncio
+    async def test_config_masks_secrets(self, client):
+        resp = await client.get("/api/config")
+        data = await resp.json()
+        # API key and token should be masked
+        assert data["trello"]["api_key"] != "key"
+        assert data["trello"]["api_token"] != "token"
+        assert "***" in data["trello"]["api_key"]
+        assert "***" in data["trello"]["api_token"]
+
+    @pytest.mark.asyncio
+    async def test_config_shows_projects(self, client):
+        resp = await client.get("/api/config")
+        data = await resp.json()
+        assert "testproject" in data["claude"]["projects"]
+        assert data["claude"]["projects"]["testproject"]["working_dir"] == "~/src/testproject"
+
+    @pytest.mark.asyncio
+    async def test_config_shows_web_settings(self, client):
+        resp = await client.get("/api/config")
+        data = await resp.json()
+        assert data["web"]["enabled"] is True
+        assert "port" in data["web"]
+
+    @pytest.mark.asyncio
+    async def test_config_shows_poll_interval(self, client):
+        resp = await client.get("/api/config")
+        data = await resp.json()
+        assert "poll_interval" in data

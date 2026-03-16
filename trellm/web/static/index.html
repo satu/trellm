@@ -101,15 +101,21 @@
             <table id="history-table">
                 <thead>
                     <tr>
-                        <th>Project</th>
-                        <th>Cost</th>
-                        <th>Duration</th>
+                        <th class="sortable" data-sort="project" onclick="sortHistory('project')">Project</th>
+                        <th class="sortable" data-sort="cost" onclick="sortHistory('cost')">Cost</th>
+                        <th class="sortable" data-sort="duration" onclick="sortHistory('duration')">Duration</th>
                         <th>Changes</th>
-                        <th>When</th>
+                        <th>Tokens</th>
+                        <th class="sortable" data-sort="when" onclick="sortHistory('when')">When</th>
                     </tr>
                 </thead>
                 <tbody id="history-body"></tbody>
             </table>
+        </section>
+
+        <section id="config-section" class="card">
+            <h2>Configuration</h2>
+            <pre id="config-content" class="config-panel">Loading...</pre>
         </section>
     </main>
 
