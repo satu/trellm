@@ -773,6 +773,11 @@ async def process_cards(
 
         # Run Claude Code
         try:
+            # Set up output callback for web dashboard streaming
+            output_cb = None
+            if _web_server:
+                output_cb = lambda line, cid=card.id: _web_server.append_output(cid, line)
+
             result = await claude.run(
                 card=card,
                 project=project,
@@ -780,6 +785,7 @@ async def process_cards(
                 working_dir=config.get_working_dir(project),
                 last_card_id=last_card_id,
                 compact_prompt=config.get_compact_prompt(project),
+                output_callback=output_cb,
             )
 
             # Update session ID and last card ID for next task
@@ -894,6 +900,11 @@ async def process_card_for_project(
 
         # Run Claude Code
         try:
+            # Set up output callback for web dashboard streaming
+            output_cb = None
+            if _web_server:
+                output_cb = lambda line, cid=card.id: _web_server.append_output(cid, line)
+
             result = await claude.run(
                 card=card,
                 project=project,
@@ -901,6 +912,7 @@ async def process_card_for_project(
                 working_dir=config.get_working_dir(project),
                 last_card_id=last_card_id,
                 compact_prompt=config.get_compact_prompt(project),
+                output_callback=output_cb,
             )
 
             # Update session ID and last card ID for next task

@@ -601,6 +601,88 @@ class TestClaudeRunnerFailureReporting:
         assert "stdout" in log_messages.lower() or "Task failed badly" in log_messages
 
 
+class TestClaudeRunnerOutputCallback:
+    """Tests for output_callback in _run_once."""
+
+    @pytest.fixture
+    def runner(self):
+        config = ClaudeConfig(binary="claude", timeout=60, yolo=True, projects={})
+        return ClaudeRunner(config)
+
+    @pytest.fixture
+    def mock_card(self):
+        return TrelloCard(
+            id="card123", name="test card", description="test",
+            url="https://trello.com/c/test", last_activity="2026-01-01T00:00:00Z",
+        )
+
+    @pytest.mark.asyncio
+    async def test_output_callback_receives_stderr_lines(self, runner, mock_card):
+        """When output_callback is provided, it receives stderr lines."""
+        stdout_data = b'{"type":"result","result":"done","session_id":"sess-1"}\n'
+        stderr_data = b"Processing task...\nRunning tests...\n"
+
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+
+        # Create StreamReader mocks that behave like readline iterators
+        stdout_lines_iter = iter(stdout_data.split(b"\n"))
+        stderr_lines_iter = iter(stderr_data.split(b"\n"))
+
+        async def stdout_readline():
+            try:
+                line = next(stdout_lines_iter)
+                return line + b"\n" if line else b""
+            except StopIteration:
+                return b""
+
+        async def stderr_readline():
+            try:
+                line = next(stderr_lines_iter)
+                return line + b"\n" if line else b""
+            except StopIteration:
+                return b""
+
+        mock_proc.stdout = AsyncMock()
+        mock_proc.stdout.readline = stdout_readline
+        mock_proc.stderr = AsyncMock()
+        mock_proc.stderr.readline = stderr_readline
+        mock_proc.wait = AsyncMock(return_value=0)
+
+        captured_lines = []
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            result = await runner._run_once(
+                card=mock_card, project="test", working_dir="/tmp/test",
+                session_id=None, prefix="[test] ",
+                output_callback=lambda line: captured_lines.append(line),
+            )
+
+        assert result.session_id == "sess-1"
+        assert len(captured_lines) > 0
+        combined = "".join(captured_lines)
+        assert "Processing task" in combined
+        assert "Running tests" in combined
+
+    @pytest.mark.asyncio
+    async def test_no_output_callback_still_works(self, runner, mock_card):
+        """Without output_callback, _run_once works as before."""
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate.return_value = (
+            b'{"type":"result","result":"done","session_id":"sess-2"}\n',
+            b"some stderr\n",
+        )
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            result = await runner._run_once(
+                card=mock_card, project="test", working_dir="/tmp/test",
+                session_id=None, prefix="[test] ",
+            )
+
+        assert result.session_id == "sess-2"
+
+
 class TestClaudeRunnerCompact:
     """Tests for the /compact functionality."""
 

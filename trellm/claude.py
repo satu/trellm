@@ -762,6 +762,7 @@ class ClaudeRunner:
         working_dir: Optional[str],
         last_card_id: Optional[str] = None,
         compact_prompt: Optional[str] = None,
+        output_callback: Optional[callable] = None,
     ) -> ClaudeResult:
         """Run Claude Code as a subprocess with the given task.
 
@@ -822,6 +823,7 @@ class ClaudeRunner:
                     session_id=current_session_id,
                     working_dir=working_dir,
                     prefix=prefix,
+                    output_callback=output_callback,
                 )
 
                 # Get cost info after successful execution
@@ -945,6 +947,7 @@ class ClaudeRunner:
         session_id: Optional[str],
         working_dir: Optional[str],
         prefix: str,
+        output_callback: Optional[callable] = None,
     ) -> ClaudeResult:
         """Run Claude Code once without retry logic.
 
@@ -954,6 +957,7 @@ class ClaudeRunner:
             session_id: Optional session ID to resume
             working_dir: Working directory for Claude Code
             prefix: Project prefix for logging
+            output_callback: Optional callback for stderr lines (for web dashboard streaming)
 
         Returns:
             ClaudeResult with success status, new session ID, and output
@@ -1040,11 +1044,44 @@ class ClaudeRunner:
                         stderr_lines.append(decoded)
                         # Prefix stderr output (uses captured prefix from closure)
                         print(f"{prefix}{decoded}", end="", flush=True)
+                        if output_callback:
+                            output_callback(decoded)
 
                 await asyncio.wait_for(
                     asyncio.gather(
                         read_stdout_stream(proc.stdout),  # type: ignore[arg-type]
                         read_stderr_stream(proc.stderr),  # type: ignore[arg-type]
+                    ),
+                    timeout=self.timeout,
+                )
+                await proc.wait()
+                output = "".join(stdout_lines)
+                stderr_output = "".join(stderr_lines)
+            elif output_callback:
+                # Quiet mode with output callback - stream stderr to callback
+                stdout_lines: list[str] = []
+                stderr_lines: list[str] = []
+
+                async def read_stdout(stream: asyncio.StreamReader) -> None:
+                    while True:
+                        line = await stream.readline()
+                        if not line:
+                            break
+                        stdout_lines.append(line.decode())
+
+                async def read_stderr_cb(stream: asyncio.StreamReader) -> None:
+                    while True:
+                        line = await stream.readline()
+                        if not line:
+                            break
+                        decoded = line.decode()
+                        stderr_lines.append(decoded)
+                        output_callback(decoded)
+
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        read_stdout(proc.stdout),  # type: ignore[arg-type]
+                        read_stderr_cb(proc.stderr),  # type: ignore[arg-type]
                     ),
                     timeout=self.timeout,
                 )

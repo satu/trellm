@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import time
-from dataclasses import asdict
+from collections import deque
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -41,6 +41,9 @@ class WebServer:
         self._on_restart: Optional[Callable[[], asyncio.Future]] = None
         self._usage_cache: Optional[dict] = None  # Cached usage limits data
         self._usage_cache_time: float = 0  # When cache was last updated
+        self._task_output: dict[str, deque[str]] = {}  # card_id -> output lines
+        self._task_output_subscribers: dict[str, list[asyncio.Queue]] = {}
+        self._output_buffer_limit = 5000  # Max lines per task
 
     def track_task(self, card_id: str, project: str, card_name: str, card_url: str) -> None:
         """Register a task for dashboard visibility."""
@@ -50,10 +53,32 @@ class WebServer:
             "card_url": card_url,
             "started_at": time.time(),
         }
+        self._task_output[card_id] = deque(maxlen=self._output_buffer_limit)
+        self._task_output_subscribers[card_id] = []
 
     def untrack_task(self, card_id: str) -> None:
         """Remove a completed/cancelled task from tracking."""
         self._task_info.pop(card_id, None)
+        self._task_output.pop(card_id, None)
+        # Signal subscribers that the task is done
+        for queue in self._task_output_subscribers.pop(card_id, []):
+            queue.put_nowait(None)
+
+    def append_output(self, card_id: str, line: str) -> None:
+        """Append an output line for a running task."""
+        buf = self._task_output.get(card_id)
+        if buf is None:
+            return
+        buf.append(line)
+        for queue in self._task_output_subscribers.get(card_id, []):
+            queue.put_nowait(line)
+
+    def get_output(self, card_id: str) -> list[str]:
+        """Get all buffered output lines for a task."""
+        buf = self._task_output.get(card_id)
+        if buf is None:
+            return []
+        return list(buf)
 
     def set_callbacks(
         self,
@@ -118,6 +143,7 @@ class WebServer:
         app.router.add_post("/api/abort", self._handle_abort)
         app.router.add_post("/api/restart", self._handle_restart)
         app.router.add_post("/api/usage/refresh", self._handle_usage_refresh)
+        app.router.add_get("/api/stream/{card_id}", self._handle_stream)
         # Serve static files (index.html at root)
         app.router.add_get("/", self._handle_index)
         app.router.add_static("/static", STATIC_DIR, show_index=False)
@@ -180,6 +206,7 @@ class WebServer:
                 "card_name": info["card_name"],
                 "card_url": info["card_url"],
                 "duration_seconds": int(now - info["started_at"]),
+                "has_output": card_id in self._task_output and len(self._task_output[card_id]) > 0,
             })
         return web.json_response({"tasks": tasks})
 
@@ -308,3 +335,43 @@ class WebServer:
             return web.json_response(
                 {"error": str(e)}, status=500,
             )
+
+    async def _handle_stream(self, request: web.Request) -> web.StreamResponse:
+        card_id = request.match_info["card_id"]
+        if card_id not in self._task_info:
+            return web.json_response({"error": "Task not found"}, status=404)
+
+        response = web.StreamResponse(
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            },
+        )
+        await response.prepare(request)
+
+        # Send existing buffered output
+        for line in self.get_output(card_id):
+            await response.write(f"data: {line}".encode())
+
+        # Subscribe to new output
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        subscribers = self._task_output_subscribers.get(card_id, [])
+        subscribers.append(queue)
+
+        try:
+            while True:
+                line = await queue.get()
+                if line is None:
+                    # Task completed
+                    await response.write(b"event: done\ndata: task completed\n\n")
+                    break
+                await response.write(f"data: {line}".encode())
+        except (ConnectionResetError, asyncio.CancelledError):
+            pass
+        finally:
+            subscribers = self._task_output_subscribers.get(card_id, [])
+            if queue in subscribers:
+                subscribers.remove(queue)
+
+        return response

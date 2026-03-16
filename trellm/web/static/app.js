@@ -4,6 +4,8 @@
     const REFRESH_INTERVAL = 5000;
     let countdown = 5;
     let timer = null;
+    let activeStream = null;  // Current EventSource for live output
+    let activeCardId = null;  // Card ID being streamed
 
     async function fetchJSON(url) {
         const resp = await fetch(url);
@@ -53,6 +55,11 @@
         const table = document.getElementById("tasks-table");
         const empty = document.getElementById("tasks-empty");
 
+        // Auto-close output panel if the streamed task is no longer running
+        if (activeCardId && !data.tasks.some(function(t) { return t.card_id === activeCardId; })) {
+            closeOutput();
+        }
+
         if (data.tasks.length === 0) {
             table.classList.add("hidden");
             empty.classList.remove("hidden");
@@ -66,7 +73,8 @@
             const link = t.card_url
                 ? '<a href="' + t.card_url + '" target="_blank">' + escapeHtml(t.card_name) + '</a>'
                 : escapeHtml(t.card_name);
-            return '<tr><td>' + escapeHtml(t.project) + '</td><td>' + link + '</td><td>' + formatDuration(t.duration_seconds) + '</td></tr>';
+            var streamBtn = '<button class="btn-stream" onclick="viewOutput(\'' + t.card_id + '\', \'' + escapeHtml(t.card_name).replace(/'/g, "\\'") + '\')">View</button>';
+            return '<tr><td>' + escapeHtml(t.project) + '</td><td>' + link + '</td><td>' + formatDuration(t.duration_seconds) + '</td><td>' + streamBtn + '</td></tr>';
         }).join("");
     }
 
@@ -257,6 +265,56 @@
             })
             .catch(function(e) { showControlStatus("Abort failed: " + e.message, true); })
             .finally(function() { document.getElementById("btn-abort").disabled = false; });
+    };
+
+    window.viewOutput = function(cardId, cardName) {
+        // Close any existing stream
+        if (activeStream) {
+            activeStream.close();
+            activeStream = null;
+        }
+        activeCardId = cardId;
+
+        var section = document.getElementById("output-section");
+        var content = document.getElementById("output-content");
+        var taskName = document.getElementById("output-task-name");
+
+        taskName.textContent = cardName;
+        content.textContent = "";
+        section.classList.remove("hidden");
+
+        // Connect to SSE stream
+        activeStream = new EventSource("/api/stream/" + cardId);
+
+        activeStream.onmessage = function(e) {
+            content.textContent += e.data;
+            if (document.getElementById("output-autoscroll").checked) {
+                content.scrollTop = content.scrollHeight;
+            }
+        };
+
+        activeStream.addEventListener("done", function() {
+            content.textContent += "\n--- Task completed ---\n";
+            activeStream.close();
+            activeStream = null;
+            activeCardId = null;
+        });
+
+        activeStream.onerror = function() {
+            activeStream.close();
+            activeStream = null;
+            activeCardId = null;
+        };
+    };
+
+    window.closeOutput = function() {
+        if (activeStream) {
+            activeStream.close();
+            activeStream = null;
+        }
+        activeCardId = null;
+        document.getElementById("output-section").classList.add("hidden");
+        document.getElementById("output-content").textContent = "";
     };
 
     window.confirmRestart = function() {

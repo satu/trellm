@@ -433,3 +433,73 @@ class TestWebConfig:
         config = load_config(str(config_file))
         assert config.web.enabled is False
         assert config.web.port == 8077
+
+
+class TestWebServerOutputBuffer:
+    """Tests for per-task output buffering."""
+
+    def test_append_output_stores_lines(self, web_server):
+        web_server.track_task("card1", "proj", "test card", "http://example.com")
+        web_server.append_output("card1", "line 1\n")
+        web_server.append_output("card1", "line 2\n")
+        lines = web_server.get_output("card1")
+        assert lines == ["line 1\n", "line 2\n"]
+
+    def test_append_output_untracked_card_ignored(self, web_server):
+        # Should not raise even if card is not tracked
+        web_server.append_output("nonexistent", "some line\n")
+        assert web_server.get_output("nonexistent") == []
+
+    def test_get_output_empty(self, web_server):
+        assert web_server.get_output("nonexistent") == []
+
+    def test_output_cleared_on_untrack(self, web_server):
+        web_server.track_task("card1", "proj", "test card", "http://example.com")
+        web_server.append_output("card1", "line 1\n")
+        web_server.untrack_task("card1")
+        assert web_server.get_output("card1") == []
+
+    def test_output_buffer_limit(self, web_server):
+        web_server.track_task("card1", "proj", "test card", "http://example.com")
+        # Write more lines than the buffer limit
+        for i in range(6000):
+            web_server.append_output("card1", f"line {i}\n")
+        lines = web_server.get_output("card1")
+        assert len(lines) <= 5000
+        # Should keep the most recent lines
+        assert lines[-1] == "line 5999\n"
+
+
+class TestWebServerSSEStream:
+    """Tests for SSE streaming endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_stream_endpoint_exists(self, web_server):
+        app = web_server._create_app()
+        async with TestClient(TestServer(app)) as client:
+            web_server.track_task("card1", "proj", "test", "http://example.com")
+            web_server.append_output("card1", "hello\n")
+            resp = await client.get("/api/stream/card1")
+            assert resp.status == 200
+            assert resp.headers["Content-Type"] == "text/event-stream"
+
+    @pytest.mark.asyncio
+    async def test_stream_sends_existing_buffer(self, web_server):
+        app = web_server._create_app()
+        async with TestClient(TestServer(app)) as client:
+            web_server.track_task("card1", "proj", "test", "http://example.com")
+            web_server.append_output("card1", "line 1\n")
+            web_server.append_output("card1", "line 2\n")
+            resp = await client.get("/api/stream/card1")
+            # Read some data (the existing buffer should be sent)
+            data = await resp.content.read(4096)
+            text = data.decode()
+            assert "line 1" in text
+            assert "line 2" in text
+
+    @pytest.mark.asyncio
+    async def test_stream_unknown_card_returns_404(self, web_server):
+        app = web_server._create_app()
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/stream/nonexistent")
+            assert resp.status == 404

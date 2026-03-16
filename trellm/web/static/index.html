@@ -61,10 +61,22 @@
                         <th>Project</th>
                         <th>Card</th>
                         <th>Duration</th>
+                        <th>Output</th>
                     </tr>
                 </thead>
                 <tbody id="tasks-body"></tbody>
             </table>
+        </section>
+
+        <section id="output-section" class="card hidden">
+            <div class="section-header">
+                <h2>Live Output: <span id="output-task-name">-</span></h2>
+                <div class="output-controls">
+                    <label class="autoscroll-label"><input type="checkbox" id="output-autoscroll" checked> Auto-scroll</label>
+                    <button class="btn btn-small" onclick="closeOutput()">Close</button>
+                </div>
+            </div>
+            <pre id="output-content" class="output-panel"></pre>
         </section>
 
         <section id="projects-section" class="card">

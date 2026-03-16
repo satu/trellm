@@ -297,6 +297,51 @@ td a:hover {
     color: #f85149;
 }
 
+.output-panel {
+    background: #0d1117;
+    border: 1px solid #21262d;
+    border-radius: 6px;
+    padding: 12px;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 0.8rem;
+    line-height: 1.6;
+    color: #c9d1d9;
+    max-height: 500px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.output-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.autoscroll-label {
+    font-size: 0.8rem;
+    color: #8b949e;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.btn-stream {
+    background: none;
+    border: 1px solid #30363d;
+    color: #58a6ff;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    cursor: pointer;
+}
+
+.btn-stream:hover {
+    border-color: #58a6ff;
+    background: #161b22;
+}
+
 footer {
     text-align: center;
     padding: 12px;
