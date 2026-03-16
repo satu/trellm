@@ -983,6 +983,7 @@ async def run_polling_loop(
     last_processed_card_id: Optional[str] = None
 
     # Start web dashboard if enabled
+    _restart_event = asyncio.Event()
     if config.web.enabled:
         _web_server = WebServer(
             config=config,
@@ -1005,7 +1006,7 @@ async def run_polling_loop(
             """Restart callback for web dashboard."""
             await _web_abort()
             logger.info("Restart triggered from web dashboard")
-            raise RestartRequested()
+            _restart_event.set()
 
         _web_server.set_callbacks(on_abort=_web_abort, on_restart=_web_restart)
         await _web_server.start()
@@ -1198,6 +1199,10 @@ async def run_polling_loop(
                 logger.error("Error in polling loop: %s", e)
 
             await asyncio.sleep(current_config.poll_interval)
+
+            # Check if restart was requested from web dashboard
+            if _restart_event.is_set():
+                raise RestartRequested()
     finally:
         # Cancel all running tasks on shutdown
         for task in _running_tasks:
