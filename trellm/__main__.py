@@ -988,6 +988,23 @@ async def run_polling_loop(
             processing_cards=_processing_cards,
             start_time=time.time(),
         )
+
+        async def _web_abort() -> None:
+            """Abort callback for web dashboard."""
+            for task in list(_running_tasks):
+                task.cancel()
+            if _running_tasks:
+                await asyncio.gather(*_running_tasks, return_exceptions=True)
+            _processing_cards.clear()
+            logger.info("Abort triggered from web dashboard")
+
+        async def _web_restart() -> None:
+            """Restart callback for web dashboard."""
+            await _web_abort()
+            logger.info("Restart triggered from web dashboard")
+            raise RestartRequested()
+
+        _web_server.set_callbacks(on_abort=_web_abort, on_restart=_web_restart)
         await _web_server.start()
 
     logger.info("TreLLM started, polling every %d seconds", config.poll_interval)

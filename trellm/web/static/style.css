@@ -228,6 +228,51 @@ td a:hover {
     margin-top: 2px;
 }
 
+.controls {
+    display: flex;
+    gap: 12px;
+}
+
+.btn {
+    padding: 8px 18px;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: opacity 0.2s;
+}
+
+.btn:hover { opacity: 0.85; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-danger {
+    background: #da3633;
+    color: #fff;
+}
+
+.btn-warning {
+    background: #d29922;
+    color: #fff;
+}
+
+.control-status {
+    margin-top: 10px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 0.85rem;
+}
+
+.control-status.success {
+    background: #1a3a1a;
+    color: #3fb950;
+}
+
+.control-status.error {
+    background: #3a1a1a;
+    color: #f85149;
+}
+
 footer {
     text-align: center;
     padding: 12px;

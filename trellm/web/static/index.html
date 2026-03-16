@@ -40,6 +40,15 @@
             </div>
         </section>
 
+        <section id="controls-section" class="card">
+            <h2>Controls</h2>
+            <div class="controls">
+                <button id="btn-abort" class="btn btn-danger" onclick="confirmAbort()">Abort All Tasks</button>
+                <button id="btn-restart" class="btn btn-warning" onclick="confirmRestart()">Restart TreLLM</button>
+            </div>
+            <div id="control-status" class="control-status hidden"></div>
+        </section>
+
         <section id="tasks-section" class="card">
             <h2>Running Tasks</h2>
             <div id="tasks-empty" class="empty-state">No tasks running</div>

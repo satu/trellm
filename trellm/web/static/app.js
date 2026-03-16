@@ -215,6 +215,48 @@
         document.getElementById(map[target]).classList.add("active");
     });
 
+    // Control actions
+    function showControlStatus(msg, isError) {
+        var el = document.getElementById("control-status");
+        el.textContent = msg;
+        el.className = "control-status" + (isError ? " error" : " success");
+        el.classList.remove("hidden");
+        setTimeout(function() { el.classList.add("hidden"); }, 5000);
+    }
+
+    window.confirmAbort = function() {
+        if (!confirm("Abort all running tasks? This will cancel all in-progress work.")) return;
+        document.getElementById("btn-abort").disabled = true;
+        fetch("/api/abort", { method: "POST" })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.success) {
+                    showControlStatus("Aborted " + data.tasks_cancelled + " task(s)", false);
+                    refresh();
+                } else {
+                    showControlStatus("Abort failed: " + (data.error || "unknown"), true);
+                }
+            })
+            .catch(function(e) { showControlStatus("Abort failed: " + e.message, true); })
+            .finally(function() { document.getElementById("btn-abort").disabled = false; });
+    };
+
+    window.confirmRestart = function() {
+        if (!confirm("Restart TreLLM? This will cancel all tasks and restart the process.")) return;
+        document.getElementById("btn-restart").disabled = true;
+        fetch("/api/restart", { method: "POST" })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.success) {
+                    showControlStatus("Restart initiated, page will reconnect...", false);
+                } else {
+                    showControlStatus("Restart failed: " + (data.error || "unknown"), true);
+                }
+            })
+            .catch(function(e) { showControlStatus("Restart initiated, reconnecting...", false); })
+            .finally(function() { document.getElementById("btn-restart").disabled = false; });
+    };
+
     // Countdown timer
     function tick() {
         countdown--;

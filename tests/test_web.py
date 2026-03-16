@@ -263,6 +263,88 @@ class TestWebServerTrackTask:
         assert web_server.config.poll_interval == 30
 
 
+class TestWebServerAbort:
+    """Tests for POST /api/abort endpoint."""
+
+    async def test_abort_without_callback(self, client):
+        resp = await client.post("/api/abort")
+        assert resp.status == 503
+        data = await resp.json()
+        assert "error" in data
+
+    async def test_abort_with_callback(self, web_server):
+        abort_called = False
+
+        async def mock_abort():
+            nonlocal abort_called
+            abort_called = True
+
+        web_server.set_callbacks(on_abort=mock_abort, on_restart=mock_abort)
+        app = web_server._create_app()
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/api/abort")
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["success"] is True
+            assert abort_called
+
+    async def test_abort_clears_task_info(self, web_server):
+        async def mock_abort():
+            pass
+
+        web_server.set_callbacks(on_abort=mock_abort, on_restart=mock_abort)
+        web_server.track_task("c1", "proj", "Card", "url")
+        app = web_server._create_app()
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/api/abort")
+            assert resp.status == 200
+            assert len(web_server._task_info) == 0
+
+
+class TestWebServerRestart:
+    """Tests for POST /api/restart endpoint."""
+
+    async def test_restart_without_callback(self, client):
+        resp = await client.post("/api/restart")
+        assert resp.status == 503
+        data = await resp.json()
+        assert "error" in data
+
+    async def test_restart_with_callback(self, web_server):
+        restart_called = False
+
+        async def mock_abort():
+            pass
+
+        async def mock_restart():
+            nonlocal restart_called
+            restart_called = True
+
+        web_server.set_callbacks(on_abort=mock_abort, on_restart=mock_restart)
+        app = web_server._create_app()
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/api/restart")
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["success"] is True
+            assert restart_called
+
+    async def test_restart_reports_error_on_exception(self, web_server):
+        async def mock_abort():
+            pass
+
+        async def mock_restart():
+            raise RuntimeError("test error")
+
+        web_server.set_callbacks(on_abort=mock_abort, on_restart=mock_restart)
+        app = web_server._create_app()
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/api/restart")
+            assert resp.status == 500
+            data = await resp.json()
+            assert "error" in data
+
+
 class TestWebConfig:
     """Tests for WebConfig in config loading."""
 

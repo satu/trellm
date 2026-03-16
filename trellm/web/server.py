@@ -5,7 +5,7 @@ import logging
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from aiohttp import web
 
@@ -37,6 +37,8 @@ class WebServer:
         self._app: Optional[web.Application] = None
         self._runner: Optional[web.AppRunner] = None
         self._task_info: dict[str, dict] = {}  # task_id -> {project, card_name, card_url, started_at}
+        self._on_abort: Optional[Callable[[], asyncio.Future]] = None
+        self._on_restart: Optional[Callable[[], asyncio.Future]] = None
 
     def track_task(self, card_id: str, project: str, card_name: str, card_url: str) -> None:
         """Register a task for dashboard visibility."""
@@ -51,6 +53,15 @@ class WebServer:
         """Remove a completed/cancelled task from tracking."""
         self._task_info.pop(card_id, None)
 
+    def set_callbacks(
+        self,
+        on_abort: Callable[[], asyncio.Future],
+        on_restart: Callable[[], asyncio.Future],
+    ) -> None:
+        """Set callbacks for control actions."""
+        self._on_abort = on_abort
+        self._on_restart = on_restart
+
     def update_config(self, config: Config) -> None:
         """Update config reference after hot reload."""
         self.config = config
@@ -61,6 +72,8 @@ class WebServer:
         app.router.add_get("/api/tasks", self._handle_tasks)
         app.router.add_get("/api/projects", self._handle_projects)
         app.router.add_get("/api/stats", self._handle_stats)
+        app.router.add_post("/api/abort", self._handle_abort)
+        app.router.add_post("/api/restart", self._handle_restart)
         # Serve static files (index.html at root)
         app.router.add_get("/", self._handle_index)
         app.router.add_static("/static", STATIC_DIR, show_index=False)
@@ -232,3 +245,41 @@ class WebServer:
             "recent_history": recent_history,
         }
         return web.json_response(data)
+
+    async def _handle_abort(self, request: web.Request) -> web.Response:
+        if not self._on_abort:
+            return web.json_response(
+                {"error": "Abort not available"}, status=503,
+            )
+        try:
+            tasks_cancelled = len(self.running_tasks)
+            await self._on_abort()
+            self._task_info.clear()
+            return web.json_response({
+                "success": True,
+                "tasks_cancelled": tasks_cancelled,
+            })
+        except Exception as e:
+            logger.error("Abort failed: %s", e)
+            return web.json_response(
+                {"error": str(e)}, status=500,
+            )
+
+    async def _handle_restart(self, request: web.Request) -> web.Response:
+        if not self._on_restart:
+            return web.json_response(
+                {"error": "Restart not available"}, status=503,
+            )
+        try:
+            tasks_cancelled = len(self.running_tasks)
+            await self._on_restart()
+            return web.json_response({
+                "success": True,
+                "tasks_cancelled": tasks_cancelled,
+                "message": "Restart initiated",
+            })
+        except Exception as e:
+            logger.error("Restart failed: %s", e)
+            return web.json_response(
+                {"error": str(e)}, status=500,
+            )
