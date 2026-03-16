@@ -9,10 +9,13 @@ from trellm.__main__ import (
     is_maintenance_command,
     is_reset_session_command,
     is_abort_command,
+    is_restart_command,
     handle_stats_command,
     handle_maintenance_command,
     handle_reset_session_command,
     handle_abort_command,
+    handle_restart_command,
+    RestartRequested,
 )
 from trellm.config import (
     Config,
@@ -991,3 +994,203 @@ class TestHandleAbortCommand:
         confirmation = abort_comments[0][0][1]
         assert "1" in confirmation  # 1 task cancelled
         assert "1" in confirmation  # 1 card moved
+
+
+class TestIsRestartCommand:
+    """Tests for is_restart_command function."""
+
+    def test_restart_command_basic(self):
+        """Test basic /restart command detection."""
+        assert is_restart_command("trellm /restart")
+
+    def test_restart_command_with_colon(self):
+        """Test /restart with colon format."""
+        assert is_restart_command("trellm: /restart")
+
+    def test_restart_command_case_insensitive(self):
+        """Test /restart is case insensitive."""
+        assert is_restart_command("trellm /RESTART")
+        assert is_restart_command("Trellm /restart")
+        assert is_restart_command("TRELLM /Restart")
+
+    def test_not_restart_command(self):
+        """Test regular cards are not detected as /restart."""
+        assert not is_restart_command("trellm Fix bug")
+        assert not is_restart_command("trellm Add restart feature")
+        assert not is_restart_command("trellm / restart")  # space breaks command
+
+    def test_restart_requires_trellm_prefix(self):
+        """Test /restart only works with 'trellm' as prefix."""
+        assert not is_restart_command("myproject /restart")
+        assert not is_restart_command("smugcoin /restart")
+
+    def test_restart_not_after_project_name(self):
+        """Test /restart must appear immediately after trellm."""
+        assert not is_restart_command("trellm problem with /restart")
+        assert not is_restart_command("trellm implement /restart")
+
+    def test_restart_single_word_not_matched(self):
+        """Test that single word cards are not matched."""
+        assert not is_restart_command("/restart")
+        assert not is_restart_command("trellm")
+
+
+class TestHandleRestartCommand:
+    """Tests for handle_restart_command function."""
+
+    @pytest.mark.asyncio
+    async def test_handle_restart_raises_restart_requested(self):
+        """Test /restart raises RestartRequested after handling."""
+        card = TrelloCard(
+            id="restart-card-123",
+            name="trellm /restart",
+            url="https://trello.com/c/test",
+            description="",
+            last_activity="2026-01-24T10:00:00Z",
+        )
+
+        trello = MagicMock()
+        trello.get_todo_cards = AsyncMock(return_value=[])
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+        trello.close = AsyncMock()
+
+        with pytest.raises(RestartRequested):
+            await handle_restart_command(
+                card=card,
+                trello=trello,
+                running_tasks=set(),
+                processing_cards=set(),
+            )
+
+    @pytest.mark.asyncio
+    async def test_handle_restart_posts_comment_before_restart(self):
+        """Test /restart posts confirmation comment."""
+        card = TrelloCard(
+            id="restart-card-123",
+            name="trellm /restart",
+            url="https://trello.com/c/test",
+            description="",
+            last_activity="2026-01-24T10:00:00Z",
+        )
+
+        trello = MagicMock()
+        trello.get_todo_cards = AsyncMock(return_value=[])
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+        trello.close = AsyncMock()
+
+        with pytest.raises(RestartRequested):
+            await handle_restart_command(
+                card=card,
+                trello=trello,
+                running_tasks=set(),
+                processing_cards=set(),
+            )
+
+        trello.add_comment.assert_called_once()
+        comment_arg = trello.add_comment.call_args[0][1]
+        assert "/restart" in comment_arg
+        trello.move_to_ready.assert_called_once_with("restart-card-123")
+
+    @pytest.mark.asyncio
+    async def test_handle_restart_cancels_running_tasks(self):
+        """Test /restart cancels running asyncio tasks."""
+        card = TrelloCard(
+            id="restart-card-123",
+            name="trellm /restart",
+            url="https://trello.com/c/test",
+            description="",
+            last_activity="2026-01-24T10:00:00Z",
+        )
+
+        trello = MagicMock()
+        trello.get_todo_cards = AsyncMock(return_value=[])
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+        trello.close = AsyncMock()
+
+        task1 = MagicMock()
+        task1.cancel = MagicMock()
+        task1.cancelled = MagicMock(return_value=False)
+        task2 = MagicMock()
+        task2.cancel = MagicMock()
+        task2.cancelled = MagicMock(return_value=False)
+
+        running_tasks = {task1, task2}
+
+        with patch("asyncio.gather", new_callable=AsyncMock, return_value=[]):
+            with pytest.raises(RestartRequested):
+                await handle_restart_command(
+                    card=card,
+                    trello=trello,
+                    running_tasks=running_tasks,
+                    processing_cards=set(),
+                )
+
+        task1.cancel.assert_called_once()
+        task2.cancel.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_restart_clears_processing_cards(self):
+        """Test /restart clears the processing cards set."""
+        card = TrelloCard(
+            id="restart-card-123",
+            name="trellm /restart",
+            url="https://trello.com/c/test",
+            description="",
+            last_activity="2026-01-24T10:00:00Z",
+        )
+
+        trello = MagicMock()
+        trello.get_todo_cards = AsyncMock(return_value=[])
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+        trello.close = AsyncMock()
+
+        processing_cards = {"card-a", "card-b"}
+
+        with patch("asyncio.gather", new_callable=AsyncMock, return_value=[]):
+            with pytest.raises(RestartRequested):
+                await handle_restart_command(
+                    card=card,
+                    trello=trello,
+                    running_tasks=set(),
+                    processing_cards=processing_cards,
+                )
+
+        assert len(processing_cards) == 0
+
+    @pytest.mark.asyncio
+    async def test_handle_restart_summary_includes_counts(self):
+        """Test /restart confirmation includes task/card counts."""
+        card = TrelloCard(
+            id="restart-card-123",
+            name="trellm /restart",
+            url="https://trello.com/c/test",
+            description="",
+            last_activity="2026-01-24T10:00:00Z",
+        )
+
+        trello = MagicMock()
+        trello.get_todo_cards = AsyncMock(return_value=[])
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+        trello.close = AsyncMock()
+
+        task1 = MagicMock()
+        task1.cancel = MagicMock()
+        task1.cancelled = MagicMock(return_value=False)
+        running_tasks = {task1}
+
+        with patch("asyncio.gather", new_callable=AsyncMock, return_value=[]):
+            with pytest.raises(RestartRequested):
+                await handle_restart_command(
+                    card=card,
+                    trello=trello,
+                    running_tasks=running_tasks,
+                    processing_cards={"card-a"},
+                )
+
+        comment_arg = trello.add_comment.call_args[0][1]
+        assert "1" in comment_arg  # 1 task cancelled

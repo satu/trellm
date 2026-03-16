@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import logging
+import os
 import sys
 from collections import defaultdict
 from dataclasses import asdict
@@ -101,6 +102,34 @@ def is_reset_session_command(card_name: str, valid_projects: set[str] | None = N
 
     # /reset-session must be the second word (immediately after project name)
     return parts[1] == "/reset-session"
+
+
+class RestartRequested(Exception):
+    """Raised when a /restart command is processed to signal process restart."""
+
+    pass
+
+
+def is_restart_command(card_name: str) -> bool:
+    """Check if a card is a /restart command.
+
+    The /restart command is a global command that uses "trellm" as the prefix:
+    - "trellm /restart" - valid
+    - "trellm: /restart" - valid
+    - "myproject /restart" - NOT valid (must be "trellm")
+
+    Returns:
+        True if the card is a valid /restart command, False otherwise.
+    """
+    parts = card_name.lower().split()
+    if len(parts) < 2:
+        return False
+
+    prefix = parts[0].rstrip(":")
+    if prefix != "trellm":
+        return False
+
+    return parts[1] == "/restart"
 
 
 def is_abort_command(card_name: str) -> bool:
@@ -459,6 +488,54 @@ async def handle_abort_command(
         return False
 
 
+async def handle_restart_command(
+    card: TrelloCard,
+    trello: TrelloClient,
+    running_tasks: set[asyncio.Task],
+    processing_cards: set[str],
+) -> None:
+    """Handle a /restart command card.
+
+    Cancels all running tasks, posts a confirmation comment, moves the card
+    to READY TO TRY, then raises RestartRequested to signal the process
+    should re-exec itself.
+
+    Args:
+        card: The Trello card with the /restart command
+        trello: Trello client for API calls
+        running_tasks: Set of currently running asyncio tasks
+        processing_cards: Set of card IDs currently being processed
+
+    Raises:
+        RestartRequested: Always raised after successful handling to trigger restart.
+    """
+    # 1. Cancel all running tasks
+    tasks_cancelled = len(running_tasks)
+    for task in list(running_tasks):
+        task.cancel()
+    if running_tasks:
+        await asyncio.gather(*running_tasks, return_exceptions=True)
+
+    # 2. Clear processing state
+    processing_cards.clear()
+
+    # 3. Post confirmation comment and move card
+    comment = (
+        f"Claude: /restart command processed\n\n"
+        f"Cancelled {tasks_cancelled} running task(s). "
+        f"Restarting TreLLM process..."
+    )
+    await trello.add_comment(card.id, comment)
+    await trello.move_to_ready(card.id)
+
+    logger.info(
+        "Handled /restart: cancelled %d tasks, restarting process",
+        tasks_cancelled,
+    )
+
+    raise RestartRequested()
+
+
 def compare_configs(old: Config, new: Config) -> list[str]:
     """Compare two configs and return a list of changes.
 
@@ -546,7 +623,7 @@ async def process_cards(
 
     processed_count = 0
 
-    # Check for /abort command FIRST - it takes priority over everything
+    # Check for /abort and /restart commands FIRST - they take priority
     for card in cards:
         if is_abort_command(card.name):
             logger.info("Detected /abort command: %s", card.name)
@@ -560,6 +637,17 @@ async def process_cards(
                 state.mark_processed(card.id)
                 processed_count += 1
             return processed_count
+
+        if is_restart_command(card.name):
+            logger.info("Detected /restart command: %s", card.name)
+            state.mark_processed(card.id)
+            await handle_restart_command(
+                card=card,
+                trello=trello,
+                running_tasks=_running_tasks,
+                processing_cards=_processing_cards,
+            )
+            # handle_restart_command always raises RestartRequested
 
     for card in cards:
         # Skip if already processed (unless moved back to TODO)
@@ -926,7 +1014,7 @@ async def run_polling_loop(
                 cards = await trello.get_todo_cards()
                 logger.debug("Found %d cards in TODO", len(cards))
 
-                # Check for /abort command FIRST - it takes priority
+                # Check for /abort and /restart commands FIRST - they take priority
                 abort_handled = False
                 for card in cards:
                     if is_abort_command(card.name):
@@ -942,6 +1030,18 @@ async def run_polling_loop(
                             state.mark_processed(card.id)
                         abort_handled = True
                         break
+
+                    if is_restart_command(card.name):
+                        logger.info("Detected /restart command: %s", card.name)
+                        _processing_cards.add(card.id)
+                        state.mark_processed(card.id)
+                        await handle_restart_command(
+                            card=card,
+                            trello=trello,
+                            running_tasks=_running_tasks,
+                            processing_cards=_processing_cards,
+                        )
+                        # handle_restart_command always raises RestartRequested
 
                 if abort_handled:
                     await asyncio.sleep(current_config.poll_interval)
@@ -1044,6 +1144,8 @@ async def run_polling_loop(
                         card.id,
                     )
 
+            except RestartRequested:
+                raise
             except Exception as e:
                 logger.error("Error in polling loop: %s", e)
 
@@ -1130,12 +1232,24 @@ def main() -> None:
     # verbose >= 1 enables Claude conversation streaming
     show_claude_output = args.verbose >= 1
     if args.once:
-        count = asyncio.run(run_once(config, verbose=show_claude_output))
-        logger.info("Processed %d cards", count)
+        try:
+            count = asyncio.run(run_once(config, verbose=show_claude_output))
+            logger.info("Processed %d cards", count)
+        except RestartRequested:
+            logger.info("Restart requested, re-executing process...")
+            os.execv(sys.executable, [sys.executable] + sys.argv)
     else:
-        asyncio.run(
-            run_polling_loop(config, verbose=show_claude_output, config_path=args.config)
-        )
+        while True:
+            try:
+                asyncio.run(
+                    run_polling_loop(
+                        config, verbose=show_claude_output, config_path=args.config
+                    )
+                )
+                break  # Normal exit
+            except RestartRequested:
+                logger.info("Restart requested, re-executing process...")
+                os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
 if __name__ == "__main__":
