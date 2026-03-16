@@ -8,9 +8,11 @@ from trellm.__main__ import (
     is_stats_command,
     is_maintenance_command,
     is_reset_session_command,
+    is_abort_command,
     handle_stats_command,
     handle_maintenance_command,
     handle_reset_session_command,
+    handle_abort_command,
 )
 from trellm.config import (
     Config,
@@ -748,3 +750,244 @@ class TestHandleResetSessionCommand:
         comment_arg = trello.add_comment.call_args[0][1]
         assert "/reset-session completed" in comment_arg
         assert "smugcoin" in comment_arg
+
+
+class TestIsAbortCommand:
+    """Tests for is_abort_command function."""
+
+    def test_abort_command_basic(self):
+        """Test basic /abort command detection."""
+        assert is_abort_command("trellm /abort")
+
+    def test_abort_command_with_colon(self):
+        """Test /abort with colon format."""
+        assert is_abort_command("trellm: /abort")
+
+    def test_abort_command_case_insensitive(self):
+        """Test /abort is case insensitive."""
+        assert is_abort_command("trellm /ABORT")
+        assert is_abort_command("Trellm /abort")
+        assert is_abort_command("TRELLM /Abort")
+
+    def test_not_abort_command(self):
+        """Test regular cards are not detected as /abort."""
+        assert not is_abort_command("trellm Fix bug")
+        assert not is_abort_command("trellm Add abort feature")
+        assert not is_abort_command("trellm / abort")  # space breaks command
+
+    def test_abort_requires_trellm_prefix(self):
+        """Test /abort only works with 'trellm' as prefix, not other projects."""
+        assert not is_abort_command("myproject /abort")
+        assert not is_abort_command("smugcoin /abort")
+
+    def test_abort_not_after_project_name(self):
+        """Test /abort must appear immediately after trellm."""
+        assert not is_abort_command("trellm problem with /abort")
+        assert not is_abort_command("trellm implement /abort")
+
+    def test_abort_single_word_not_matched(self):
+        """Test that single word cards are not matched."""
+        assert not is_abort_command("/abort")
+        assert not is_abort_command("trellm")
+
+
+class TestHandleAbortCommand:
+    """Tests for handle_abort_command function."""
+
+    @pytest.mark.asyncio
+    async def test_handle_abort_no_tasks_no_cards(self):
+        """Test /abort when there's nothing to abort."""
+        card = TrelloCard(
+            id="abort-card-123",
+            name="trellm /abort",
+            url="https://trello.com/c/test",
+            description="",
+            last_activity="2026-01-24T10:00:00Z",
+        )
+
+        trello = MagicMock()
+        trello.get_todo_cards = AsyncMock(return_value=[])
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+
+        result = await handle_abort_command(
+            card=card,
+            trello=trello,
+            running_tasks=set(),
+            processing_cards=set(),
+        )
+
+        assert result is True
+        # Abort card gets a confirmation comment and is moved
+        trello.add_comment.assert_called_once()
+        comment_arg = trello.add_comment.call_args[0][1]
+        assert "/abort" in comment_arg
+        trello.move_to_ready.assert_called_once_with("abort-card-123")
+
+    @pytest.mark.asyncio
+    async def test_handle_abort_moves_todo_cards(self):
+        """Test /abort moves TODO cards to READY TO TRY with comments."""
+        abort_card = TrelloCard(
+            id="abort-card-123",
+            name="trellm /abort",
+            url="https://trello.com/c/test",
+            description="",
+            last_activity="2026-01-24T10:00:00Z",
+        )
+
+        todo_card1 = TrelloCard(
+            id="todo-card-1",
+            name="myproject Fix bug",
+            url="https://trello.com/c/test1",
+            description="",
+            last_activity="2026-01-24T09:00:00Z",
+        )
+        todo_card2 = TrelloCard(
+            id="todo-card-2",
+            name="otherproject Add feature",
+            url="https://trello.com/c/test2",
+            description="",
+            last_activity="2026-01-24T09:00:00Z",
+        )
+
+        trello = MagicMock()
+        # get_todo_cards returns the abort card plus other TODO cards
+        trello.get_todo_cards = AsyncMock(
+            return_value=[abort_card, todo_card1, todo_card2]
+        )
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+
+        result = await handle_abort_command(
+            card=abort_card,
+            trello=trello,
+            running_tasks=set(),
+            processing_cards=set(),
+        )
+
+        assert result is True
+        # 2 TODO cards get abort comments + 1 abort card confirmation = 3 comments
+        assert trello.add_comment.call_count == 3
+        # 2 TODO cards + 1 abort card = 3 moves
+        assert trello.move_to_ready.call_count == 3
+
+        # Check that TODO cards got abort comments
+        comment_calls = trello.add_comment.call_args_list
+        todo_comments = [c for c in comment_calls if c[0][0] != "abort-card-123"]
+        for call in todo_comments:
+            assert "aborted" in call[0][1].lower()
+
+    @pytest.mark.asyncio
+    async def test_handle_abort_cancels_running_tasks(self):
+        """Test /abort cancels running asyncio tasks."""
+        abort_card = TrelloCard(
+            id="abort-card-123",
+            name="trellm /abort",
+            url="https://trello.com/c/test",
+            description="",
+            last_activity="2026-01-24T10:00:00Z",
+        )
+
+        trello = MagicMock()
+        trello.get_todo_cards = AsyncMock(return_value=[])
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+
+        # Create mock tasks
+        task1 = MagicMock()
+        task1.cancel = MagicMock()
+        task1.cancelled = MagicMock(return_value=False)
+        task2 = MagicMock()
+        task2.cancel = MagicMock()
+        task2.cancelled = MagicMock(return_value=False)
+
+        running_tasks = {task1, task2}
+
+        with patch("asyncio.gather", new_callable=AsyncMock, return_value=[]):
+            result = await handle_abort_command(
+                card=abort_card,
+                trello=trello,
+                running_tasks=running_tasks,
+                processing_cards=set(),
+            )
+
+        assert result is True
+        task1.cancel.assert_called_once()
+        task2.cancel.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_abort_clears_processing_cards(self):
+        """Test /abort clears the processing cards set."""
+        abort_card = TrelloCard(
+            id="abort-card-123",
+            name="trellm /abort",
+            url="https://trello.com/c/test",
+            description="",
+            last_activity="2026-01-24T10:00:00Z",
+        )
+
+        trello = MagicMock()
+        trello.get_todo_cards = AsyncMock(return_value=[])
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+
+        processing_cards = {"card-a", "card-b"}
+
+        with patch("asyncio.gather", new_callable=AsyncMock, return_value=[]):
+            result = await handle_abort_command(
+                card=abort_card,
+                trello=trello,
+                running_tasks=set(),
+                processing_cards=processing_cards,
+            )
+
+        assert result is True
+        assert len(processing_cards) == 0
+
+    @pytest.mark.asyncio
+    async def test_handle_abort_summary_counts(self):
+        """Test /abort confirmation comment includes correct counts."""
+        abort_card = TrelloCard(
+            id="abort-card-123",
+            name="trellm /abort",
+            url="https://trello.com/c/test",
+            description="",
+            last_activity="2026-01-24T10:00:00Z",
+        )
+
+        todo_card = TrelloCard(
+            id="todo-card-1",
+            name="myproject Fix bug",
+            url="https://trello.com/c/test1",
+            description="",
+            last_activity="2026-01-24T09:00:00Z",
+        )
+
+        trello = MagicMock()
+        trello.get_todo_cards = AsyncMock(return_value=[abort_card, todo_card])
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+
+        task1 = MagicMock()
+        task1.cancel = MagicMock()
+        task1.cancelled = MagicMock(return_value=False)
+        running_tasks = {task1}
+
+        with patch("asyncio.gather", new_callable=AsyncMock, return_value=[]):
+            result = await handle_abort_command(
+                card=abort_card,
+                trello=trello,
+                running_tasks=running_tasks,
+                processing_cards=set(),
+            )
+
+        assert result is True
+        # Find the confirmation comment on the abort card
+        abort_comments = [
+            c for c in trello.add_comment.call_args_list
+            if c[0][0] == "abort-card-123"
+        ]
+        assert len(abort_comments) == 1
+        confirmation = abort_comments[0][0][1]
+        assert "1" in confirmation  # 1 task cancelled
+        assert "1" in confirmation  # 1 card moved

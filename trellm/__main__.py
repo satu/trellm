@@ -103,6 +103,30 @@ def is_reset_session_command(card_name: str, valid_projects: set[str] | None = N
     return parts[1] == "/reset-session"
 
 
+def is_abort_command(card_name: str) -> bool:
+    """Check if a card is a /abort command.
+
+    The /abort command is a global command that uses "trellm" as the prefix:
+    - "trellm /abort" - valid
+    - "trellm: /abort" - valid
+    - "myproject /abort" - NOT valid (must be "trellm")
+
+    Returns:
+        True if the card is a valid /abort command, False otherwise.
+    """
+    parts = card_name.lower().split()
+    if len(parts) < 2:
+        return False
+
+    # Must use "trellm" as the prefix (literal, not a project name)
+    prefix = parts[0].rstrip(":")
+    if prefix != "trellm":
+        return False
+
+    # /abort must be the second word
+    return parts[1] == "/abort"
+
+
 def is_maintenance_command(card_name: str, valid_projects: set[str] | None = None) -> bool:
     """Check if a card is a /maintenance command.
 
@@ -358,6 +382,83 @@ async def handle_maintenance_command(
         return False
 
 
+async def handle_abort_command(
+    card: TrelloCard,
+    trello: TrelloClient,
+    running_tasks: set[asyncio.Task],
+    processing_cards: set[str],
+) -> bool:
+    """Handle a /abort command card.
+
+    Cancels all running tasks, moves all TODO cards to READY TO TRY
+    with abort comments, and clears processing state.
+
+    Args:
+        card: The Trello card with the /abort command
+        trello: Trello client for API calls
+        running_tasks: Set of currently running asyncio tasks
+        processing_cards: Set of card IDs currently being processed
+
+    Returns:
+        True if handled successfully, False otherwise.
+    """
+    try:
+        # 1. Cancel all running tasks
+        tasks_cancelled = len(running_tasks)
+        for task in list(running_tasks):
+            task.cancel()
+        if running_tasks:
+            await asyncio.gather(*running_tasks, return_exceptions=True)
+
+        # 2. Clear processing state
+        processing_cards.clear()
+
+        # 3. Move all TODO cards to READY TO TRY with abort comments
+        todo_cards = await trello.get_todo_cards()
+        cards_moved = 0
+        for todo_card in todo_cards:
+            if todo_card.id == card.id:
+                continue  # Skip the abort card itself
+            try:
+                await trello.add_comment(
+                    todo_card.id,
+                    "Claude: Operation aborted by /abort command",
+                )
+                await trello.move_to_ready(todo_card.id)
+                cards_moved += 1
+            except Exception as e:
+                logger.error(
+                    "Failed to abort card %s: %s", todo_card.id, e
+                )
+
+        # 4. Confirm on the abort card
+        comment = (
+            f"Claude: /abort command processed\n\n"
+            f"Cancelled {tasks_cancelled} running task(s), "
+            f"moved {cards_moved} card(s) to READY TO TRY."
+        )
+        await trello.add_comment(card.id, comment)
+        await trello.move_to_ready(card.id)
+
+        logger.info(
+            "Handled /abort: cancelled %d tasks, moved %d cards",
+            tasks_cancelled,
+            cards_moved,
+        )
+        return True
+
+    except Exception as e:
+        logger.error("Failed to handle /abort command: %s", e)
+        try:
+            await trello.add_comment(
+                card.id, f"Claude: /abort command failed\n\nError: {e}"
+            )
+            await trello.move_to_ready(card.id)
+        except Exception:
+            pass
+        return False
+
+
 def compare_configs(old: Config, new: Config) -> list[str]:
     """Compare two configs and return a list of changes.
 
@@ -444,6 +545,21 @@ async def process_cards(
     logger.debug("Found %d cards in TODO", len(cards))
 
     processed_count = 0
+
+    # Check for /abort command FIRST - it takes priority over everything
+    for card in cards:
+        if is_abort_command(card.name):
+            logger.info("Detected /abort command: %s", card.name)
+            success = await handle_abort_command(
+                card=card,
+                trello=trello,
+                running_tasks=_running_tasks,
+                processing_cards=_processing_cards,
+            )
+            if success:
+                state.mark_processed(card.id)
+                processed_count += 1
+            return processed_count
 
     for card in cards:
         # Skip if already processed (unless moved back to TODO)
@@ -809,6 +925,27 @@ async def run_polling_loop(
             try:
                 cards = await trello.get_todo_cards()
                 logger.debug("Found %d cards in TODO", len(cards))
+
+                # Check for /abort command FIRST - it takes priority
+                abort_handled = False
+                for card in cards:
+                    if is_abort_command(card.name):
+                        logger.info("Detected /abort command: %s", card.name)
+                        _processing_cards.add(card.id)
+                        success = await handle_abort_command(
+                            card=card,
+                            trello=trello,
+                            running_tasks=_running_tasks,
+                            processing_cards=_processing_cards,
+                        )
+                        if success:
+                            state.mark_processed(card.id)
+                        abort_handled = True
+                        break
+
+                if abort_handled:
+                    await asyncio.sleep(current_config.poll_interval)
+                    continue
 
                 for card in cards:
                     # Skip if already being processed
