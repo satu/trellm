@@ -16,7 +16,10 @@
         <section id="usage-section" class="card">
             <div class="section-header">
                 <h2>Claude Usage Limits</h2>
-                <button id="btn-refresh-usage" class="btn btn-small" onclick="refreshUsage()">Refresh</button>
+                <div class="header-right">
+                    <span id="usage-age" class="usage-age"></span>
+                    <button id="btn-refresh-usage" class="btn btn-small" onclick="refreshUsage()">Refresh</button>
+                </div>
             </div>
             <div id="usage-limits" class="status-grid"></div>
         </section>

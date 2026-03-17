@@ -239,6 +239,17 @@ td a:hover {
     margin-bottom: 0;
 }
 
+.header-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.usage-age {
+    font-size: 0.75rem;
+    color: #484f58;
+}
+
 .btn-small {
     padding: 4px 12px;
     font-size: 0.75rem;
