@@ -617,28 +617,31 @@ class TestClaudeRunnerOutputCallback:
         )
 
     @pytest.mark.asyncio
-    async def test_output_callback_receives_stderr_lines(self, runner, mock_card):
-        """When output_callback is provided, it receives stderr lines."""
-        stdout_data = b'{"type":"result","result":"done","session_id":"sess-1"}\n'
-        stderr_data = b"Processing task...\nRunning tests...\n"
+    async def test_output_callback_receives_parsed_stdout(self, runner, mock_card):
+        """When output_callback is provided, it receives parsed stream-json content."""
+        # stream-json format: each line is a JSON object
+        stdout_lines_raw = [
+            b'{"type":"assistant","message":{"content":[{"type":"text","text":"I will fix this bug."}]}}\n',
+            b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"git status"}}]}}\n',
+            b'{"type":"result","result":"done","session_id":"sess-1"}\n',
+        ]
+        stderr_data = b"some stderr\n"
 
         mock_proc = AsyncMock()
         mock_proc.returncode = 0
 
-        # Create StreamReader mocks that behave like readline iterators
-        stdout_lines_iter = iter(stdout_data.split(b"\n"))
-        stderr_lines_iter = iter(stderr_data.split(b"\n"))
+        stdout_iter = iter(stdout_lines_raw + [b""])
+        stderr_iter = iter(stderr_data.split(b"\n"))
 
         async def stdout_readline():
             try:
-                line = next(stdout_lines_iter)
-                return line + b"\n" if line else b""
+                return next(stdout_iter)
             except StopIteration:
                 return b""
 
         async def stderr_readline():
             try:
-                line = next(stderr_lines_iter)
+                line = next(stderr_iter)
                 return line + b"\n" if line else b""
             except StopIteration:
                 return b""
@@ -661,8 +664,53 @@ class TestClaudeRunnerOutputCallback:
         assert result.session_id == "sess-1"
         assert len(captured_lines) > 0
         combined = "".join(captured_lines)
-        assert "Processing task" in combined
-        assert "Running tests" in combined
+        # Should contain parsed human-readable content from stream-json
+        assert "fix this bug" in combined
+        assert "Bash" in combined
+
+    @pytest.mark.asyncio
+    async def test_output_callback_uses_stream_json_format(self, runner, mock_card):
+        """When output_callback is provided, stream-json output format is used."""
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+
+        stdout_iter = iter([b'{"type":"result","result":"ok","session_id":"s1"}\n', b""])
+        stderr_iter = iter([b""])
+
+        async def stdout_readline():
+            try:
+                return next(stdout_iter)
+            except StopIteration:
+                return b""
+
+        async def stderr_readline():
+            try:
+                return next(stderr_iter)
+            except StopIteration:
+                return b""
+
+        mock_proc.stdout = AsyncMock()
+        mock_proc.stdout.readline = stdout_readline
+        mock_proc.stderr = AsyncMock()
+        mock_proc.stderr.readline = stderr_readline
+        mock_proc.wait = AsyncMock(return_value=0)
+
+        called_with_cmd = []
+        original_exec = asyncio.create_subprocess_exec
+
+        async def capture_exec(*args, **kwargs):
+            called_with_cmd.extend(args)
+            return mock_proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=capture_exec):
+            await runner._run_once(
+                card=mock_card, project="test", working_dir="/tmp/test",
+                session_id=None, prefix="[test] ",
+                output_callback=lambda line: None,
+            )
+
+        # Should use stream-json format when output_callback is provided
+        assert "stream-json" in called_with_cmd
 
     @pytest.mark.asyncio
     async def test_no_output_callback_still_works(self, runner, mock_card):

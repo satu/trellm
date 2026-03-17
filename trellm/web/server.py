@@ -353,7 +353,7 @@ class WebServer:
 
         # Send existing buffered output
         for line in self.get_output(card_id):
-            await response.write(f"data: {line}".encode())
+            await response.write(f"data: {line}\n".encode())
 
         # Subscribe to new output
         queue: asyncio.Queue[str | None] = asyncio.Queue()
@@ -367,7 +367,7 @@ class WebServer:
                     # Task completed
                     await response.write(b"event: done\ndata: task completed\n\n")
                     break
-                await response.write(f"data: {line}".encode())
+                await response.write(f"data: {line}\n".encode())
         except (ConnectionResetError, asyncio.CancelledError):
             pass
         finally:

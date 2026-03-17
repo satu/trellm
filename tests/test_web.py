@@ -498,6 +498,19 @@ class TestWebServerSSEStream:
             assert "line 2" in text
 
     @pytest.mark.asyncio
+    async def test_stream_uses_proper_sse_format(self, web_server):
+        """SSE events must end with double newline for EventSource to parse."""
+        app = web_server._create_app()
+        async with TestClient(TestServer(app)) as client:
+            web_server.track_task("card1", "proj", "test", "http://example.com")
+            web_server.append_output("card1", "hello world\n")
+            resp = await client.get("/api/stream/card1")
+            data = await resp.content.read(4096)
+            text = data.decode()
+            # Each SSE event must have "data: ...\n\n" format
+            assert "data: hello world\n\n" in text
+
+    @pytest.mark.asyncio
     async def test_stream_unknown_card_returns_404(self, web_server):
         app = web_server._create_app()
         async with TestClient(TestServer(app)) as client:

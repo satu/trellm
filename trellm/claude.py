@@ -971,12 +971,14 @@ class ClaudeRunner:
         prompt = self._build_prompt(card)
 
         # Build command
+        # Use stream-json when verbose or when output_callback needs live output
+        use_stream = self.verbose or output_callback is not None
         cmd = [
             self.binary,
             "-p",
             prompt,
             "--output-format",
-            "stream-json" if self.verbose else "json",
+            "stream-json" if use_stream else "json",
         ]
 
         if self.verbose:
@@ -1058,16 +1060,22 @@ class ClaudeRunner:
                 output = "".join(stdout_lines)
                 stderr_output = "".join(stderr_lines)
             elif output_callback:
-                # Quiet mode with output callback - stream stderr to callback
+                # Quiet mode with output callback - stream parsed content to callback
+                # Uses stream-json format so we get rich content from stdout
                 stdout_lines: list[str] = []
                 stderr_lines: list[str] = []
 
-                async def read_stdout(stream: asyncio.StreamReader) -> None:
+                async def read_stdout_cb(stream: asyncio.StreamReader) -> None:
                     while True:
                         line = await stream.readline()
                         if not line:
                             break
-                        stdout_lines.append(line.decode())
+                        decoded = line.decode()
+                        stdout_lines.append(decoded)
+                        # Parse stream-json and forward human-readable content
+                        readable = self._extract_readable_from_stream_json(decoded)
+                        if readable:
+                            output_callback(readable)
 
                 async def read_stderr_cb(stream: asyncio.StreamReader) -> None:
                     while True:
@@ -1080,7 +1088,7 @@ class ClaudeRunner:
 
                 await asyncio.wait_for(
                     asyncio.gather(
-                        read_stdout(proc.stdout),  # type: ignore[arg-type]
+                        read_stdout_cb(proc.stdout),  # type: ignore[arg-type]
                         read_stderr_cb(proc.stderr),  # type: ignore[arg-type]
                     ),
                     timeout=self.timeout,
@@ -1235,6 +1243,55 @@ class ClaudeRunner:
 
         except json.JSONDecodeError:
             pass
+
+    def _extract_readable_from_stream_json(self, line: str) -> Optional[str]:
+        """Extract human-readable content from a stream-json line.
+
+        Returns a readable string if the line contains useful content,
+        or None if it should be skipped.
+        """
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            return None
+
+        try:
+            data = json.loads(line)
+            msg_type = data.get("type")
+
+            if msg_type == "assistant":
+                parts = []
+                content = data.get("message", {}).get("content", [])
+                for item in content:
+                    item_type = item.get("type")
+                    if item_type == "text":
+                        text = item.get("text", "")
+                        if text:
+                            parts.append(f"[Claude] {text}\n")
+                    elif item_type == "tool_use":
+                        tool_name = item.get("name", "unknown")
+                        tool_input = item.get("input", {})
+                        if tool_name == "Bash":
+                            cmd = tool_input.get("command", "")[:100]
+                            parts.append(f"[Tool: {tool_name}] {cmd}\n")
+                        elif tool_name in ("Edit", "Read", "Write"):
+                            fp = tool_input.get("file_path", "")
+                            parts.append(f"[Tool: {tool_name}] {fp}\n")
+                        elif tool_name == "Grep":
+                            pattern = tool_input.get("pattern", "")
+                            parts.append(f"[Tool: {tool_name}] {pattern}\n")
+                        else:
+                            parts.append(f"[Tool: {tool_name}]\n")
+                return "".join(parts) if parts else None
+
+            elif msg_type == "result":
+                result = data.get("result", "")
+                if result:
+                    return f"[Result] {result[:200]}\n"
+
+        except json.JSONDecodeError:
+            pass
+
+        return None
 
     def _build_prompt(self, card: TrelloCard) -> str:
         """Build the prompt for Claude Code."""
