@@ -366,6 +366,48 @@ class TestWebServerUsageRefresh:
             assert data["usage_cache_age_seconds"] >= 0
 
 
+    async def test_usage_cache_persists_across_restart(self, config, tmp_path):
+        """Usage cache should persist in state file and survive restarts."""
+        state = _make_state(tmp_path)
+        ws1 = _make_web_server(config, state)
+
+        # First server fetches usage data
+        with patch("trellm.web.server.fetch_claude_usage_limits", return_value=_mock_usage_limits()):
+            await ws1.refresh_usage_limits()
+
+        assert ws1._usage_cache is not None
+        assert ws1._usage_cache_time > 0
+
+        # Create a new WebServer simulating restart (same state file)
+        ws2 = _make_web_server(config, state)
+        # Should load cached data from state
+        assert ws2._usage_cache is not None
+        assert ws2._usage_cache_time > 0
+        assert ws2._usage_cache.get("five_hour", {}).get("utilization") == 42.5
+
+    async def test_usage_cache_cooldown_survives_restart(self, config, tmp_path):
+        """Cooldown should be respected even after restart."""
+        state = _make_state(tmp_path)
+        ws1 = _make_web_server(config, state)
+        call_count = 0
+
+        def counting_fetch():
+            nonlocal call_count
+            call_count += 1
+            return _mock_usage_limits()
+
+        with patch("trellm.web.server.fetch_claude_usage_limits", side_effect=counting_fetch):
+            await ws1.refresh_usage_limits()
+            assert call_count == 1
+
+        # Create new server (restart) using same state
+        ws2 = _make_web_server(config, state)
+        with patch("trellm.web.server.fetch_claude_usage_limits", side_effect=counting_fetch):
+            await ws2.refresh_usage_limits()
+            # Should be skipped due to cooldown persisted in state
+            assert call_count == 1
+
+
 class TestWebServerAbort:
     """Tests for POST /api/abort endpoint."""
 

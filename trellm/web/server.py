@@ -39,9 +39,11 @@ class WebServer:
         self._task_info: dict[str, dict] = {}  # task_id -> {project, card_name, card_url, started_at}
         self._on_abort: Optional[Callable[[], asyncio.Future]] = None
         self._on_restart: Optional[Callable[[], asyncio.Future]] = None
-        self._usage_cache: Optional[dict] = None  # Cached usage limits data
-        self._usage_cache_time: float = 0  # When cache was last updated
         self._usage_cooldown = 300  # Minimum seconds between API calls (5 min)
+        # Load persisted usage cache from state (survives restarts)
+        persisted = self.state.state.get("usage_cache", {})
+        self._usage_cache: Optional[dict] = persisted.get("data")
+        self._usage_cache_time: float = persisted.get("timestamp", 0)
         self._task_output: dict[str, deque[str]] = {}  # card_id -> output lines
         self._task_output_subscribers: dict[str, list[asyncio.Queue]] = {}
         self._output_buffer_limit = 5000  # Max lines per task
@@ -162,9 +164,14 @@ class WebServer:
                 # DON'T update cooldown timer so we can retry on next call
                 logger.warning("Usage API: error in response: %s", usage_limits.error)
             else:
-                # Success — start cooldown timer
+                # Success — start cooldown timer and persist to state
                 self._usage_cache_time = time.time()
-                logger.info("Usage API: success")
+                self.state.state["usage_cache"] = {
+                    "data": self._usage_cache,
+                    "timestamp": self._usage_cache_time,
+                }
+                self.state._save()
+                logger.info("Usage API: success (persisted to state)")
         except Exception as e:
             logger.warning("Usage API: exception: %s", e)
             self._usage_cache = {"error": str(e)}
