@@ -327,7 +327,7 @@
         activeStream = new EventSource("/api/stream/" + cardId);
 
         activeStream.onmessage = function(e) {
-            content.textContent += e.data;
+            content.textContent += e.data + "\n";
             if (document.getElementById("output-autoscroll").checked) {
                 content.scrollTop = content.scrollHeight;
             }
