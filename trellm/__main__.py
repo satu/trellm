@@ -23,6 +23,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Suppress aiohttp HTTP access logs at INFO level (very noisy with dashboard polling)
+# These will only show at DEBUG level (-vv)
+logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
+
 # Per-project locks to ensure only one Claude instance runs per project
 _project_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
