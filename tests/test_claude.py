@@ -757,6 +757,57 @@ class TestClaudeRunnerOutputCallback:
         assert "stream-json" in called_with_cmd
 
     @pytest.mark.asyncio
+    async def test_verbose_mode_forwards_stdout_to_callback(self, mock_card):
+        """In verbose mode, parsed stdout content should also go to output_callback."""
+        config = ClaudeConfig(binary="claude", timeout=60, yolo=True, projects={})
+        verbose_runner = ClaudeRunner(config, verbose=True)
+
+        stdout_lines_raw = [
+            b'{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"Let me check the code."}]}}\n',
+            b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}\n',
+            b'{"type":"result","result":"done","session_id":"sess-v1"}\n',
+        ]
+
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+
+        stdout_iter = iter(stdout_lines_raw + [b""])
+        stderr_iter = iter([b""])
+
+        async def stdout_readline():
+            try:
+                return next(stdout_iter)
+            except StopIteration:
+                return b""
+
+        async def stderr_readline():
+            try:
+                return next(stderr_iter)
+            except StopIteration:
+                return b""
+
+        mock_proc.stdout = AsyncMock()
+        mock_proc.stdout.readline = stdout_readline
+        mock_proc.stderr = AsyncMock()
+        mock_proc.stderr.readline = stderr_readline
+        mock_proc.wait = AsyncMock(return_value=0)
+
+        captured_lines = []
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            result = await verbose_runner._run_once(
+                card=mock_card, project="test", working_dir="/tmp/test",
+                session_id=None, prefix="[test] ",
+                output_callback=lambda line: captured_lines.append(line),
+            )
+
+        assert result.session_id == "sess-v1"
+        assert len(captured_lines) > 0
+        combined = "".join(captured_lines)
+        assert "check the code" in combined
+        assert "Bash" in combined
+
+    @pytest.mark.asyncio
     async def test_no_output_callback_still_works(self, runner, mock_card):
         """Without output_callback, _run_once works as before."""
         mock_proc = AsyncMock()

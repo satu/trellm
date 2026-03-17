@@ -1035,6 +1035,11 @@ class ClaudeRunner:
                         # Parse JSON and extract human-readable content
                         # Pass prefix to avoid race condition with parallel tasks
                         self._print_stream_json_line(decoded, prefix)
+                        # Also forward parsed content to output_callback (for web dashboard)
+                        if output_callback:
+                            readable = self._extract_readable_from_stream_json(decoded)
+                            if readable:
+                                output_callback(readable)
 
                 async def read_stderr_stream(stream: asyncio.StreamReader) -> None:
                     """Read stderr and print it with project prefix."""
