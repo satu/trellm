@@ -76,7 +76,8 @@
             const link = t.card_url
                 ? '<a href="' + t.card_url + '" target="_blank">' + escapeHtml(t.card_name) + '</a>'
                 : escapeHtml(t.card_name);
-            var streamBtn = '<button class="btn-stream" onclick="viewOutput(\'' + t.card_id + '\', \'' + escapeHtml(t.card_name).replace(/'/g, "\\'") + '\')">View</button>';
+            var lineCount = t.output_lines ? ' (' + t.output_lines + ')' : '';
+            var streamBtn = '<button class="btn-stream" onclick="viewOutput(\'' + t.card_id + '\', \'' + escapeHtml(t.card_name).replace(/'/g, "\\'") + '\')">View' + lineCount + '</button>';
             return '<tr><td>' + escapeHtml(t.project) + '</td><td>' + link + '</td><td>' + formatDuration(t.duration_seconds) + '</td><td>' + streamBtn + '</td></tr>';
         }).join("");
     }

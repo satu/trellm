@@ -69,9 +69,16 @@ class WebServer:
         """Append an output line for a running task."""
         buf = self._task_output.get(card_id)
         if buf is None:
+            logger.debug("append_output: no buffer for card %s (not tracked)", card_id)
             return
         buf.append(line)
-        for queue in self._task_output_subscribers.get(card_id, []):
+        subs = self._task_output_subscribers.get(card_id, [])
+        if len(buf) <= 3 or len(buf) % 50 == 0:
+            logger.info(
+                "append_output: card=%s lines=%d subscribers=%d preview=%s",
+                card_id[:8], len(buf), len(subs), repr(line[:80]),
+            )
+        for queue in subs:
             queue.put_nowait(line)
 
     def get_output(self, card_id: str) -> list[str]:
@@ -222,6 +229,7 @@ class WebServer:
                 "card_url": info["card_url"],
                 "duration_seconds": int(now - info["started_at"]),
                 "has_output": card_id in self._task_output and len(self._task_output[card_id]) > 0,
+                "output_lines": len(self._task_output.get(card_id, [])),
             })
         return web.json_response({"tasks": tasks})
 
@@ -354,7 +362,13 @@ class WebServer:
     async def _handle_stream(self, request: web.Request) -> web.StreamResponse:
         card_id = request.match_info["card_id"]
         if card_id not in self._task_info:
+            logger.info("SSE stream: card %s not found in task_info", card_id[:8])
             return web.json_response({"error": "Task not found"}, status=404)
+
+        logger.info(
+            "SSE stream: connecting for card %s, buffer has %d lines",
+            card_id[:8], len(self._task_output.get(card_id, [])),
+        )
 
         response = web.StreamResponse(
             headers={
@@ -366,7 +380,9 @@ class WebServer:
         await response.prepare(request)
 
         # Send existing buffered output
-        for line in self.get_output(card_id):
+        existing = self.get_output(card_id)
+        logger.info("SSE stream: sending %d existing lines", len(existing))
+        for line in existing:
             await response.write(f"data: {line}\n".encode())
 
         # Subscribe to new output
