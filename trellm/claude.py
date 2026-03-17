@@ -184,13 +184,13 @@ def fetch_claude_usage_limits(
         "Authorization": f"Bearer {token[:8]}...",
         "anthropic-beta": "oauth-2025-04-20",
     }
-    logger.info("Usage API request: User-Agent=%s", user_agent)
+    logger.debug("Usage API request: User-Agent=%s", user_agent)
 
     # Use the actual full token for the request (headers dict above has truncated for logging)
     actual_headers = dict(headers)
     actual_headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(USAGE_API_URL, headers=actual_headers)
-    logger.info("Usage API request headers: %s", {k: v for k, v in req.header_items()})
+    logger.debug("Usage API request headers: %s", {k: v for k, v in req.header_items()})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode())

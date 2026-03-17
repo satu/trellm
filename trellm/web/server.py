@@ -94,7 +94,7 @@ class WebServer:
         buf.append(line)
         subs = self._task_output_subscribers.get(card_id, [])
         if len(buf) <= 3 or len(buf) % 50 == 0:
-            logger.info(
+            logger.debug(
                 "append_output: card=%s lines=%d subscribers=%d preview=%s",
                 card_id[:8], len(buf), len(subs), repr(line[:80]),
             )
@@ -423,10 +423,10 @@ class WebServer:
         is_running = card_id in self._task_info
         is_completed = any(t["card_id"] == card_id for t in self._completed_tasks)
         if not is_running and not is_completed:
-            logger.info("SSE stream: card %s not found", card_id[:8])
+            logger.debug("SSE stream: card %s not found", card_id[:8])
             return web.json_response({"error": "Task not found"}, status=404)
 
-        logger.info(
+        logger.debug(
             "SSE stream: connecting for card %s, buffer has %d lines",
             card_id[:8], len(self._task_output.get(card_id, [])),
         )
@@ -442,7 +442,7 @@ class WebServer:
 
         # Send existing buffered output
         existing = self.get_output(card_id)
-        logger.info("SSE stream: sending %d existing lines", len(existing))
+        logger.debug("SSE stream: sending %d existing lines", len(existing))
         for line in existing:
             await response.write(f"data: {line}\n".encode())
 
