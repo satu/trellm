@@ -41,6 +41,7 @@ class WebServer:
         self._on_restart: Optional[Callable[[], asyncio.Future]] = None
         self._usage_cache: Optional[dict] = None  # Cached usage limits data
         self._usage_cache_time: float = 0  # When cache was last updated
+        self._usage_cooldown = 120  # Minimum seconds between API calls
         self._task_output: dict[str, deque[str]] = {}  # card_id -> output lines
         self._task_output_subscribers: dict[str, list[asyncio.Queue]] = {}
         self._output_buffer_limit = 5000  # Max lines per task
@@ -89,8 +90,21 @@ class WebServer:
         self._on_abort = on_abort
         self._on_restart = on_restart
 
-    async def refresh_usage_limits(self) -> None:
-        """Fetch and cache Claude usage limits. Called after ticket completion."""
+    async def refresh_usage_limits(self, force: bool = False) -> None:
+        """Fetch and cache Claude usage limits. Called after ticket completion.
+
+        Args:
+            force: If True, bypass the cooldown and always fetch.
+        """
+        # Skip if within cooldown period (unless forced)
+        if not force and self._usage_cache_time > 0:
+            elapsed = time.time() - self._usage_cache_time
+            if elapsed < self._usage_cooldown:
+                logger.debug(
+                    "Skipping usage refresh (%.0fs since last, cooldown=%ds)",
+                    elapsed, self._usage_cooldown,
+                )
+                return
         try:
             loop = asyncio.get_event_loop()
             usage_limits = await loop.run_in_executor(None, fetch_claude_usage_limits)
@@ -312,7 +326,7 @@ class WebServer:
             )
 
     async def _handle_usage_refresh(self, request: web.Request) -> web.Response:
-        await self.refresh_usage_limits()
+        await self.refresh_usage_limits(force=True)
         return web.json_response({
             "success": True,
             "usage_limits": self._usage_cache or {},

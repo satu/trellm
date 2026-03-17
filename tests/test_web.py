@@ -298,6 +298,41 @@ class TestWebServerUsageRefresh:
             assert data["usage_limits"]["five_hour"]["utilization"] == 42.5
 
 
+    async def test_usage_refresh_respects_cooldown(self, web_server):
+        """Refresh should skip the API call if called again within cooldown."""
+        call_count = 0
+        original_limits = _mock_usage_limits()
+
+        def counting_fetch():
+            nonlocal call_count
+            call_count += 1
+            return original_limits
+
+        with patch("trellm.web.server.fetch_claude_usage_limits", side_effect=counting_fetch):
+            await web_server.refresh_usage_limits()
+            assert call_count == 1
+            # Second call within cooldown should be skipped
+            await web_server.refresh_usage_limits()
+            assert call_count == 1
+
+    async def test_usage_refresh_force_bypasses_cooldown(self, web_server):
+        """Force refresh should bypass the cooldown."""
+        call_count = 0
+        original_limits = _mock_usage_limits()
+
+        def counting_fetch():
+            nonlocal call_count
+            call_count += 1
+            return original_limits
+
+        with patch("trellm.web.server.fetch_claude_usage_limits", side_effect=counting_fetch):
+            await web_server.refresh_usage_limits()
+            assert call_count == 1
+            # Force refresh should always call the API
+            await web_server.refresh_usage_limits(force=True)
+            assert call_count == 2
+
+
 class TestWebServerAbort:
     """Tests for POST /api/abort endpoint."""
 
