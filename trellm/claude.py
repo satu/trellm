@@ -1,10 +1,12 @@
 """Claude Code subprocess runner for TreLLM."""
 
 import asyncio
+import functools
 import json
 import logging
 import os
 import re
+import subprocess
 import urllib.request
 import urllib.error
 from dataclasses import dataclass, field
@@ -125,6 +127,25 @@ def _parse_usage_limit(data: Optional[dict]) -> Optional[UsageLimitInfo]:
     return UsageLimitInfo(utilization=float(utilization), resets_at=resets_at)
 
 
+@functools.lru_cache(maxsize=1)
+def _get_claude_code_version() -> str:
+    """Get the installed Claude Code version by running `claude --version`.
+
+    Returns the version string (e.g., "2.1.76") or a fallback.
+    Result is cached since the version doesn't change during runtime.
+    """
+    try:
+        result = subprocess.run(
+            ["claude", "--version"],
+            capture_output=True, text=True, timeout=5,
+        )
+        # Output is like "2.1.76 (Claude Code)\n"
+        version = result.stdout.strip().split()[0]
+        return version
+    except Exception:
+        return "2.1.0"
+
+
 def fetch_claude_usage_limits(
     credentials_path: Optional[str] = None,
 ) -> ClaudeUsageLimits:
@@ -157,7 +178,7 @@ def fetch_claude_usage_limits(
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "User-Agent": "claude-code/2.0.76",
+        "User-Agent": f"claude-code/{_get_claude_code_version()}",
         "Authorization": f"Bearer {token}",
         "anthropic-beta": "oauth-2025-04-20",
     }

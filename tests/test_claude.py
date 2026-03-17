@@ -24,6 +24,7 @@ from trellm.claude import (
     ClaudeUsageLimits,
     fetch_claude_usage_limits,
     _parse_usage_limit,
+    _get_claude_code_version,
     _get_session_jsonl_path,
     _read_token_usage_from_jsonl,
     _get_context_size_from_jsonl,
@@ -2140,6 +2141,22 @@ class TestParseUsageLimit:
         assert result is not None
         assert result.utilization == 0.0
         assert result.resets_at is None
+
+
+class TestGetClaudeCodeVersion:
+    """Tests for _get_claude_code_version function."""
+
+    def test_returns_version_string(self):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.stdout = "2.1.76 (Claude Code)\n"
+            mock_run.return_value.returncode = 0
+            version = _get_claude_code_version.__wrapped__()  # bypass lru_cache
+            assert version == "2.1.76"
+
+    def test_fallback_on_error(self):
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            version = _get_claude_code_version.__wrapped__()
+            assert version == "2.1.0"
 
 
 class TestFetchClaudeUsageLimits:
