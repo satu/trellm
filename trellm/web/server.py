@@ -107,18 +107,23 @@ class WebServer:
         if not force and self._usage_cache_time > 0:
             elapsed = time.time() - self._usage_cache_time
             if elapsed < self._usage_cooldown:
-                logger.debug(
-                    "Skipping usage refresh (%.0fs since last, cooldown=%ds)",
+                logger.info(
+                    "Usage API: skipped (%.0fs since last call, cooldown=%ds)",
                     elapsed, self._usage_cooldown,
                 )
                 return
+        logger.info(
+            "Usage API: calling fetch_claude_usage_limits (force=%s, last_call=%.0fs ago)",
+            force, time.time() - self._usage_cache_time if self._usage_cache_time else -1,
+        )
         try:
             loop = asyncio.get_event_loop()
             usage_limits = await loop.run_in_executor(None, fetch_claude_usage_limits)
             self._usage_cache = self._format_usage_data(usage_limits)
             self._usage_cache_time = time.time()
+            logger.info("Usage API: success")
         except Exception as e:
-            logger.warning("Failed to refresh usage limits: %s", e)
+            logger.warning("Usage API: failed: %s", e)
             self._usage_cache = {"error": str(e)}
             self._usage_cache_time = time.time()
 
