@@ -315,6 +315,24 @@ class TestWebServerUsageRefresh:
             await web_server.refresh_usage_limits()
             assert call_count == 1
 
+    async def test_usage_refresh_error_does_not_start_cooldown(self, web_server):
+        """If the API returns an error (e.g. 429), cooldown should NOT start."""
+        call_count = 0
+
+        def error_then_success():
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return ClaudeUsageLimits(error="API error: 429")
+            return _mock_usage_limits()
+
+        with patch("trellm.web.server.fetch_claude_usage_limits", side_effect=error_then_success):
+            await web_server.refresh_usage_limits()
+            assert call_count == 1
+            # Second call should NOT be skipped because the first was an error
+            await web_server.refresh_usage_limits()
+            assert call_count == 2
+
     async def test_usage_refresh_force_bypasses_cooldown(self, web_server):
         """Force refresh should bypass the cooldown."""
         call_count = 0

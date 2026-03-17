@@ -119,13 +119,19 @@ class WebServer:
         try:
             loop = asyncio.get_event_loop()
             usage_limits = await loop.run_in_executor(None, fetch_claude_usage_limits)
-            self._usage_cache = self._format_usage_data(usage_limits)
-            self._usage_cache_time = time.time()
-            logger.info("Usage API: success")
+            formatted = self._format_usage_data(usage_limits)
+            self._usage_cache = formatted
+            if usage_limits.error:
+                # API returned an error (e.g. 429) — cache the error but
+                # DON'T update cooldown timer so we can retry on next call
+                logger.warning("Usage API: error in response: %s", usage_limits.error)
+            else:
+                # Success — start cooldown timer
+                self._usage_cache_time = time.time()
+                logger.info("Usage API: success")
         except Exception as e:
-            logger.warning("Usage API: failed: %s", e)
+            logger.warning("Usage API: exception: %s", e)
             self._usage_cache = {"error": str(e)}
-            self._usage_cache_time = time.time()
 
     @staticmethod
     def _format_usage_data(usage_limits) -> dict:
