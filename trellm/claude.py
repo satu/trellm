@@ -175,15 +175,22 @@ def fetch_claude_usage_limits(
         return ClaudeUsageLimits(error="No OAuth access token found")
 
     # Make API request
+    cc_version = _get_claude_code_version()
+    user_agent = f"claude-code/{cc_version}"
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "User-Agent": f"claude-code/{_get_claude_code_version()}",
-        "Authorization": f"Bearer {token}",
+        "User-Agent": user_agent,
+        "Authorization": f"Bearer {token[:8]}...",
         "anthropic-beta": "oauth-2025-04-20",
     }
+    logger.info("Usage API request: User-Agent=%s", user_agent)
 
-    req = urllib.request.Request(USAGE_API_URL, headers=headers)
+    # Use the actual full token for the request (headers dict above has truncated for logging)
+    actual_headers = dict(headers)
+    actual_headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(USAGE_API_URL, headers=actual_headers)
+    logger.info("Usage API request headers: %s", {k: v for k, v in req.header_items()})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode())
