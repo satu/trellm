@@ -135,15 +135,20 @@
     function renderUsageLimits(data) {
         var el = document.getElementById("usage-limits");
         var ul = data.usage_limits;
+        var cacheAge = data.usage_cache_age_seconds;
+        var ageLabel = "";
+        if (cacheAge >= 0) {
+            ageLabel = '<div class="usage-reset" style="text-align:right;margin-bottom:8px">Updated ' + formatDuration(cacheAge) + ' ago</div>';
+        }
         if (!ul || ul.error) {
             var errMsg = ul && ul.error ? escapeHtml(ul.error) : "Unavailable";
             if (errMsg.indexOf("429") !== -1) {
-                errMsg = "Rate limited — click Refresh to retry";
+                errMsg = "Rate limited — will retry in up to 5 min";
             }
-            el.innerHTML = '<div class="empty-state">' + errMsg + '</div>';
+            el.innerHTML = ageLabel + '<div class="empty-state">' + errMsg + '</div>';
             return;
         }
-        var html = "";
+        var html = ageLabel;
         if (ul.five_hour) html += usageBar("5-Hour Session", ul.five_hour.utilization, ul.five_hour.resets_at);
         if (ul.seven_day) html += usageBar("7-Day Weekly", ul.seven_day.utilization, ul.seven_day.resets_at);
         if (ul.seven_day_opus) html += usageBar("7-Day Opus", ul.seven_day_opus.utilization, ul.seven_day_opus.resets_at);

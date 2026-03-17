@@ -333,8 +333,8 @@ class TestWebServerUsageRefresh:
             await web_server.refresh_usage_limits()
             assert call_count == 2
 
-    async def test_usage_refresh_force_bypasses_cooldown(self, web_server):
-        """Force refresh should bypass the cooldown."""
+    async def test_manual_refresh_also_respects_cooldown(self, web_server):
+        """Manual refresh button must also respect the 5-minute cooldown."""
         call_count = 0
         original_limits = _mock_usage_limits()
 
@@ -343,12 +343,27 @@ class TestWebServerUsageRefresh:
             call_count += 1
             return original_limits
 
+        app = web_server._create_app()
         with patch("trellm.web.server.fetch_claude_usage_limits", side_effect=counting_fetch):
-            await web_server.refresh_usage_limits()
-            assert call_count == 1
-            # Force refresh should always call the API
-            await web_server.refresh_usage_limits(force=True)
-            assert call_count == 2
+            async with TestClient(TestServer(app)) as client:
+                # First refresh succeeds
+                await client.post("/api/usage/refresh")
+                assert call_count == 1
+                # Second refresh within cooldown should be skipped
+                await client.post("/api/usage/refresh")
+                assert call_count == 1
+
+    async def test_stats_includes_cache_age(self, web_server):
+        """Stats endpoint should include cache age in seconds."""
+        app = web_server._create_app()
+        async with TestClient(TestServer(app)) as client:
+            # Refresh to populate cache
+            await client.post("/api/usage/refresh")
+            resp = await client.get("/api/stats")
+            data = await resp.json()
+            assert "usage_cache_age_seconds" in data
+            assert isinstance(data["usage_cache_age_seconds"], int)
+            assert data["usage_cache_age_seconds"] >= 0
 
 
 class TestWebServerAbort:

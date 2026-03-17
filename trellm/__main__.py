@@ -214,8 +214,23 @@ async def handle_stats_command(
     project = parse_project(card.name)
 
     try:
-        # Fetch real-time usage limits from Claude API
-        usage_limits = fetch_claude_usage_limits()
+        # Fetch real-time usage limits — use web server cache if available
+        # to respect the global 5-minute cooldown
+        if _web_server:
+            await _web_server.refresh_usage_limits()
+            usage_limits = None
+            if _web_server._usage_cache and "error" not in _web_server._usage_cache:
+                # Reconstruct from cache for the report
+                from .claude import ClaudeUsageLimits, UsageLimitInfo
+                cache = _web_server._usage_cache
+                usage_limits = ClaudeUsageLimits(
+                    five_hour=UsageLimitInfo(utilization=cache["five_hour"]["utilization"]) if "five_hour" in cache else None,
+                    seven_day=UsageLimitInfo(utilization=cache["seven_day"]["utilization"]) if "seven_day" in cache else None,
+                )
+            if not usage_limits:
+                usage_limits = ClaudeUsageLimits(error="Usage data not available (rate limited)")
+        else:
+            usage_limits = fetch_claude_usage_limits()
 
         # Generate stats report (includes historical stats)
         stats_report = state.format_stats_report(project if project != "unknown" else None)

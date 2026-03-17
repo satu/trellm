@@ -97,14 +97,13 @@ class WebServer:
         self._on_abort = on_abort
         self._on_restart = on_restart
 
-    async def refresh_usage_limits(self, force: bool = False) -> None:
-        """Fetch and cache Claude usage limits. Called after ticket completion.
+    async def refresh_usage_limits(self) -> None:
+        """Fetch and cache Claude usage limits.
 
-        Args:
-            force: If True, bypass the cooldown and always fetch.
+        Strictly rate-limited to one API call per cooldown period (5 min).
+        All callers go through this same gate — no exceptions.
         """
-        # Skip if within cooldown period (unless forced)
-        if not force and self._usage_cache_time > 0:
+        if self._usage_cache_time > 0:
             elapsed = time.time() - self._usage_cache_time
             if elapsed < self._usage_cooldown:
                 logger.info(
@@ -113,8 +112,8 @@ class WebServer:
                 )
                 return
         logger.info(
-            "Usage API: calling fetch_claude_usage_limits (force=%s, last_call=%.0fs ago)",
-            force, time.time() - self._usage_cache_time if self._usage_cache_time else -1,
+            "Usage API: calling fetch_claude_usage_limits (last_call=%.0fs ago)",
+            time.time() - self._usage_cache_time if self._usage_cache_time else -1,
         )
         try:
             loop = asyncio.get_event_loop()
@@ -277,6 +276,7 @@ class WebServer:
 
         # Use cached usage limits (refreshed after ticket completion or manually)
         usage_data = self._usage_cache or {}
+        cache_age = int(time.time() - self._usage_cache_time) if self._usage_cache_time else -1
 
         # Per-project stats
         by_project = {}
@@ -299,6 +299,7 @@ class WebServer:
 
         data = {
             "usage_limits": usage_data,
+            "usage_cache_age_seconds": cache_age,
             "global": {
                 "total_cost_dollars": global_stats.total_cost_dollars,
                 "total_tickets": global_stats.total_tickets,
@@ -345,10 +346,12 @@ class WebServer:
             )
 
     async def _handle_usage_refresh(self, request: web.Request) -> web.Response:
-        await self.refresh_usage_limits(force=True)
+        await self.refresh_usage_limits()
+        cache_age = int(time.time() - self._usage_cache_time) if self._usage_cache_time else -1
         return web.json_response({
             "success": True,
             "usage_limits": self._usage_cache or {},
+            "cache_age_seconds": cache_age,
         })
 
     async def _handle_restart(self, request: web.Request) -> web.Response:
