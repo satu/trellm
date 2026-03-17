@@ -136,7 +136,11 @@
         var el = document.getElementById("usage-limits");
         var ul = data.usage_limits;
         if (!ul || ul.error) {
-            el.innerHTML = '<div class="empty-state">' + (ul && ul.error ? escapeHtml(ul.error) : "Unavailable") + '</div>';
+            var errMsg = ul && ul.error ? escapeHtml(ul.error) : "Unavailable";
+            if (errMsg.indexOf("429") !== -1) {
+                errMsg = "Rate limited — click Refresh to retry";
+            }
+            el.innerHTML = '<div class="empty-state">' + errMsg + '</div>';
             return;
         }
         var html = "";

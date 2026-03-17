@@ -41,7 +41,7 @@ class WebServer:
         self._on_restart: Optional[Callable[[], asyncio.Future]] = None
         self._usage_cache: Optional[dict] = None  # Cached usage limits data
         self._usage_cache_time: float = 0  # When cache was last updated
-        self._usage_cooldown = 120  # Minimum seconds between API calls
+        self._usage_cooldown = 300  # Minimum seconds between API calls (5 min)
         self._task_output: dict[str, deque[str]] = {}  # card_id -> output lines
         self._task_output_subscribers: dict[str, list[asyncio.Queue]] = {}
         self._output_buffer_limit = 5000  # Max lines per task
