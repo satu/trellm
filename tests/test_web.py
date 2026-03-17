@@ -521,11 +521,13 @@ class TestWebServerOutputBuffer:
     def test_get_output_empty(self, web_server):
         assert web_server.get_output("nonexistent") == []
 
-    def test_output_cleared_on_untrack(self, web_server):
+    def test_output_preserved_on_untrack(self, web_server):
+        """Output is preserved in completed tasks after untrack."""
         web_server.track_task("card1", "proj", "test card", "http://example.com")
         web_server.append_output("card1", "line 1\n")
         web_server.untrack_task("card1")
-        assert web_server.get_output("card1") == []
+        # Output still accessible via get_output (from completed tasks)
+        assert web_server.get_output("card1") == ["line 1\n"]
 
     def test_output_buffer_limit(self, web_server):
         web_server.track_task("card1", "proj", "test card", "http://example.com")
@@ -536,6 +538,53 @@ class TestWebServerOutputBuffer:
         assert len(lines) <= 5000
         # Should keep the most recent lines
         assert lines[-1] == "line 5999\n"
+
+
+class TestWebServerCompletedTasks:
+    """Tests for completed task retention."""
+
+    def test_untrack_preserves_output_in_completed(self, web_server):
+        web_server.track_task("card1", "proj", "test card", "http://example.com")
+        web_server.append_output("card1", "line 1\n")
+        web_server.append_output("card1", "line 2\n")
+        web_server.untrack_task("card1")
+        # Output should be preserved in completed tasks
+        completed = web_server.get_completed_tasks()
+        assert len(completed) == 1
+        assert completed[0]["card_id"] == "card1"
+        assert completed[0]["output_lines"] == 2
+
+    def test_completed_tasks_limited_to_10(self, web_server):
+        for i in range(15):
+            cid = f"card{i}"
+            web_server.track_task(cid, "proj", f"card {i}", f"http://example.com/{i}")
+            web_server.append_output(cid, f"output {i}\n")
+            web_server.untrack_task(cid)
+        completed = web_server.get_completed_tasks()
+        assert len(completed) == 10
+        # Should keep the most recent
+        assert completed[0]["card_id"] == "card14"
+
+    def test_completed_task_output_accessible(self, web_server):
+        web_server.track_task("card1", "proj", "test", "http://example.com")
+        web_server.append_output("card1", "hello\n")
+        web_server.untrack_task("card1")
+        output = web_server.get_output("card1")
+        assert output == ["hello\n"]
+
+    @pytest.mark.asyncio
+    async def test_completed_tasks_api_endpoint(self, web_server):
+        web_server.track_task("card1", "proj", "test card", "http://example.com")
+        web_server.append_output("card1", "output line\n")
+        web_server.untrack_task("card1")
+        app = web_server._create_app()
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/completed")
+            assert resp.status == 200
+            data = await resp.json()
+            assert len(data["completed"]) == 1
+            assert data["completed"][0]["card_name"] == "test card"
+            assert data["completed"][0]["output_lines"] == 1
 
 
 class TestWebServerSSEStream:

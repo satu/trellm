@@ -45,6 +45,8 @@ class WebServer:
         self._task_output: dict[str, deque[str]] = {}  # card_id -> output lines
         self._task_output_subscribers: dict[str, list[asyncio.Queue]] = {}
         self._output_buffer_limit = 5000  # Max lines per task
+        self._completed_tasks: list[dict] = []  # Last N completed tasks with output
+        self._max_completed_tasks = 10
 
     def track_task(self, card_id: str, project: str, card_name: str, card_url: str) -> None:
         """Register a task for dashboard visibility."""
@@ -59,8 +61,24 @@ class WebServer:
 
     def untrack_task(self, card_id: str) -> None:
         """Remove a completed/cancelled task from tracking."""
-        self._task_info.pop(card_id, None)
-        self._task_output.pop(card_id, None)
+        info = self._task_info.pop(card_id, None)
+        output = self._task_output.pop(card_id, None)
+        # Preserve in completed tasks list
+        if info and output:
+            self._completed_tasks.insert(0, {
+                "card_id": card_id,
+                "project": info["project"],
+                "card_name": info["card_name"],
+                "card_url": info["card_url"],
+                "started_at": info["started_at"],
+                "completed_at": time.time(),
+                "output": list(output),
+            })
+            # Keep only last N
+            if len(self._completed_tasks) > self._max_completed_tasks:
+                self._completed_tasks = self._completed_tasks[:self._max_completed_tasks]
+            # Also keep output accessible via get_output for SSE streaming
+            self._task_output[card_id] = output
         # Signal subscribers that the task is done
         for queue in self._task_output_subscribers.pop(card_id, []):
             queue.put_nowait(None)
@@ -82,11 +100,30 @@ class WebServer:
             queue.put_nowait(line)
 
     def get_output(self, card_id: str) -> list[str]:
-        """Get all buffered output lines for a task."""
+        """Get all buffered output lines for a task (running or completed)."""
         buf = self._task_output.get(card_id)
-        if buf is None:
-            return []
-        return list(buf)
+        if buf is not None:
+            return list(buf)
+        # Check completed tasks
+        for task in self._completed_tasks:
+            if task["card_id"] == card_id:
+                return list(task.get("output", []))
+        return []
+
+    def get_completed_tasks(self) -> list[dict]:
+        """Get the list of recently completed tasks."""
+        return [
+            {
+                "card_id": t["card_id"],
+                "project": t["project"],
+                "card_name": t["card_name"],
+                "card_url": t["card_url"],
+                "started_at": t["started_at"],
+                "completed_at": t["completed_at"],
+                "output_lines": len(t.get("output", [])),
+            }
+            for t in self._completed_tasks
+        ]
 
     def set_callbacks(
         self,
@@ -176,6 +213,7 @@ class WebServer:
         app.router.add_post("/api/usage/refresh", self._handle_usage_refresh)
         app.router.add_get("/api/stream/{card_id}", self._handle_stream)
         app.router.add_get("/api/config", self._handle_config)
+        app.router.add_get("/api/completed", self._handle_completed)
         # Serve static files (index.html at root)
         app.router.add_get("/", self._handle_index)
         app.router.add_static("/static", STATIC_DIR, show_index=False)
@@ -375,8 +413,10 @@ class WebServer:
 
     async def _handle_stream(self, request: web.Request) -> web.StreamResponse:
         card_id = request.match_info["card_id"]
-        if card_id not in self._task_info:
-            logger.info("SSE stream: card %s not found in task_info", card_id[:8])
+        is_running = card_id in self._task_info
+        is_completed = any(t["card_id"] == card_id for t in self._completed_tasks)
+        if not is_running and not is_completed:
+            logger.info("SSE stream: card %s not found", card_id[:8])
             return web.json_response({"error": "Task not found"}, status=404)
 
         logger.info(
@@ -399,7 +439,12 @@ class WebServer:
         for line in existing:
             await response.write(f"data: {line}\n".encode())
 
-        # Subscribe to new output
+        # For completed tasks, send done event immediately
+        if not is_running:
+            await response.write(b"event: done\ndata: task completed\n\n")
+            return response
+
+        # Subscribe to new output (running tasks only)
         queue: asyncio.Queue[str | None] = asyncio.Queue()
         subscribers = self._task_output_subscribers.get(card_id, [])
         subscribers.append(queue)
@@ -420,6 +465,21 @@ class WebServer:
                 subscribers.remove(queue)
 
         return response
+
+    async def _handle_completed(self, request: web.Request) -> web.Response:
+        now = time.time()
+        completed = []
+        for t in self._completed_tasks:
+            completed.append({
+                "card_id": t["card_id"],
+                "project": t["project"],
+                "card_name": t["card_name"],
+                "card_url": t["card_url"],
+                "duration_seconds": int(t["completed_at"] - t["started_at"]),
+                "completed_ago_seconds": int(now - t["completed_at"]),
+                "output_lines": len(t.get("output", [])),
+            })
+        return web.json_response({"completed": completed})
 
     @staticmethod
     def _mask_secret(value: str) -> str:

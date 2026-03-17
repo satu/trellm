@@ -240,16 +240,37 @@
         return d.innerHTML;
     }
 
+    function renderCompleted(data) {
+        var section = document.getElementById("completed-section");
+        var tbody = document.getElementById("completed-body");
+        if (!data.completed || data.completed.length === 0) {
+            section.classList.add("hidden");
+            return;
+        }
+        section.classList.remove("hidden");
+        tbody.innerHTML = data.completed.map(function(t) {
+            var link = t.card_url
+                ? '<a href="' + t.card_url + '" target="_blank">' + escapeHtml(t.card_name) + '</a>'
+                : escapeHtml(t.card_name);
+            var lineCount = t.output_lines ? ' (' + t.output_lines + ')' : '';
+            var viewBtn = '<button class="btn-stream" onclick="viewCompletedOutput(\'' + t.card_id + '\', \'' + escapeHtml(t.card_name).replace(/'/g, "\\'") + '\')">View' + lineCount + '</button>';
+            var ago = formatDuration(t.completed_ago_seconds) + ' ago';
+            return '<tr><td>' + escapeHtml(t.project) + '</td><td>' + link + '</td><td>' + formatDuration(t.duration_seconds) + '</td><td>' + ago + '</td><td>' + viewBtn + '</td></tr>';
+        }).join("");
+    }
+
     async function refresh() {
         try {
-            var [status, tasks, projects, stats] = await Promise.all([
+            var [status, tasks, projects, stats, completed] = await Promise.all([
                 fetchJSON("/api/status"),
                 fetchJSON("/api/tasks"),
                 fetchJSON("/api/projects"),
                 fetchJSON("/api/stats"),
+                fetchJSON("/api/completed"),
             ]);
             renderStatus(status);
             renderTasks(tasks);
+            renderCompleted(completed);
             renderProjects(projects);
             renderUsageLimits(stats);
             renderStats(stats);
@@ -356,6 +377,39 @@
             activeStream.close();
             activeStream = null;
             activeCardId = null;
+        };
+    };
+
+    window.viewCompletedOutput = function(cardId, cardName) {
+        // Close any existing live stream
+        if (activeStream) {
+            activeStream.close();
+            activeStream = null;
+        }
+        activeCardId = null;
+
+        var section = document.getElementById("output-section");
+        var content = document.getElementById("output-content");
+        var taskName = document.getElementById("output-task-name");
+
+        taskName.textContent = cardName + " (completed)";
+        content.textContent = "Loading...";
+        section.classList.remove("hidden");
+
+        // Use SSE to fetch the buffered output (it will send existing lines then end)
+        var stream = new EventSource("/api/stream/" + cardId);
+        var outputText = "";
+        stream.onmessage = function(e) {
+            if (outputText === "Loading...") outputText = "";
+            outputText += e.data + "\n";
+            content.textContent = outputText;
+        };
+        stream.addEventListener("done", function() {
+            stream.close();
+        });
+        stream.onerror = function() {
+            stream.close();
+            if (!outputText) content.textContent = "No output available";
         };
     };
 
