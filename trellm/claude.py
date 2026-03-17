@@ -1263,7 +1263,14 @@ class ClaudeRunner:
                 content = data.get("message", {}).get("content", [])
                 for item in content:
                     item_type = item.get("type")
-                    if item_type == "text":
+                    if item_type == "thinking":
+                        thinking = item.get("thinking", "")
+                        if thinking:
+                            preview = thinking[:300]
+                            if len(thinking) > 300:
+                                preview += "..."
+                            parts.append(f"[Thinking] {preview}\n")
+                    elif item_type == "text":
                         text = item.get("text", "")
                         if text:
                             parts.append(f"[Claude] {text}\n")
@@ -1282,6 +1289,14 @@ class ClaudeRunner:
                         else:
                             parts.append(f"[Tool: {tool_name}]\n")
                 return "".join(parts) if parts else None
+
+            elif msg_type == "user":
+                content = data.get("message", {}).get("content", [])
+                for item in content:
+                    if item.get("type") == "tool_result":
+                        is_error = item.get("is_error", False)
+                        status = "error" if is_error else "done"
+                        return f"  [{status}]\n"
 
             elif msg_type == "result":
                 result = data.get("result", "")
