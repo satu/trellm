@@ -92,6 +92,22 @@ async def client(web_server):
         yield client
 
 
+class TestWebServerCacheControl:
+    """Tests for cache-control headers on static files."""
+
+    async def test_static_files_have_no_cache_header(self, client):
+        resp = await client.get("/static/app.js")
+        assert resp.headers.get("Cache-Control") == "no-cache"
+
+    async def test_index_has_no_cache_header(self, client):
+        resp = await client.get("/")
+        assert resp.headers.get("Cache-Control") == "no-cache"
+
+    async def test_api_endpoints_no_cache_control(self, client):
+        resp = await client.get("/api/status")
+        assert "no-cache" not in resp.headers.get("Cache-Control", "")
+
+
 class TestWebServerStatus:
     """Tests for /api/status endpoint."""
 
@@ -695,6 +711,62 @@ class TestWebServerSSEStream:
             text = data.decode()
             # Each SSE event must have "data: ...\n\n" format
             assert "data: hello world\n\n" in text
+
+    @pytest.mark.asyncio
+    async def test_stream_completed_via_run_id_while_same_card_running(self, web_server):
+        """When a card has both a completed run and a new running run,
+        streaming the completed run's output via run_id should return
+        the completed output, not the running task's output."""
+        app = web_server._create_app()
+        async with TestClient(TestServer(app)) as client:
+            # First run completes
+            web_server.track_task("card1", "proj", "test", "http://example.com")
+            web_server.append_output("card1", "completed output\n")
+            web_server.untrack_task("card1")
+
+            # Same card starts a new run
+            web_server.track_task("card1", "proj", "test", "http://example.com")
+            web_server.append_output("card1", "running output\n")
+
+            # Get the run_id of the completed task
+            completed = web_server.get_completed_tasks()
+            assert len(completed) == 1
+            run_id = completed[0]["run_id"]
+
+            # Stream completed output via run_id
+            resp = await client.get(f"/api/stream/{run_id}")
+            data = await resp.content.read(4096)
+            text = data.decode()
+
+            # Should contain completed output, not running output
+            assert "completed output" in text
+            assert "running output" not in text
+            # Should contain done event (completed task)
+            assert "event: done" in text
+
+    @pytest.mark.asyncio
+    async def test_stream_completed_via_card_id_while_same_card_running(self, web_server):
+        """When viewing completed output via card_id (e.g. from cached JS),
+        and the same card is also running, the stream should serve the
+        running task's output (not mix with completed)."""
+        app = web_server._create_app()
+        async with TestClient(TestServer(app)) as client:
+            # First run completes
+            web_server.track_task("card1", "proj", "test", "http://example.com")
+            web_server.append_output("card1", "completed output\n")
+            web_server.untrack_task("card1")
+
+            # Same card starts a new run
+            web_server.track_task("card1", "proj", "test", "http://example.com")
+            web_server.append_output("card1", "running output\n")
+
+            # Stream via card_id (running task takes precedence)
+            resp = await client.get("/api/stream/card1")
+            data = await resp.content.read(4096)
+            text = data.decode()
+
+            # Should contain running output
+            assert "running output" in text
 
     @pytest.mark.asyncio
     async def test_stream_unknown_card_returns_404(self, web_server):

@@ -217,7 +217,7 @@ class WebServer:
         self.config = config
 
     def _create_app(self) -> web.Application:
-        app = web.Application()
+        app = web.Application(middlewares=[self._no_cache_static_middleware])
         app.router.add_get("/api/status", self._handle_status)
         app.router.add_get("/api/tasks", self._handle_tasks)
         app.router.add_get("/api/projects", self._handle_projects)
@@ -232,6 +232,14 @@ class WebServer:
         app.router.add_get("/", self._handle_index)
         app.router.add_static("/static", STATIC_DIR, show_index=False)
         return app
+
+    @web.middleware
+    async def _no_cache_static_middleware(self, request, handler):
+        """Prevent browser caching of static files."""
+        response = await handler(request)
+        if request.path.startswith("/static") or request.path == "/":
+            response.headers["Cache-Control"] = "no-cache"
+        return response
 
     async def start(self) -> None:
         """Start the web server."""
