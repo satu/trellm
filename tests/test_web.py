@@ -607,6 +607,33 @@ class TestWebServerCompletedTasks:
         # Should keep the most recent
         assert completed[0]["card_id"] == "card14"
 
+    def test_same_card_running_and_completed_output_isolated(self, web_server):
+        """When a card has both a completed run and a new running run,
+        the completed output should be separate from the running output."""
+        # First run completes
+        web_server.track_task("card1", "proj", "test card", "http://example.com")
+        web_server.append_output("card1", "first run output\n")
+        web_server.untrack_task("card1")
+
+        # Same card starts a new run
+        web_server.track_task("card1", "proj", "test card", "http://example.com")
+        web_server.append_output("card1", "second run output\n")
+
+        # Completed tasks should have a run_id to access completed output
+        completed = web_server.get_completed_tasks()
+        assert len(completed) == 1
+        run_id = completed[0]["run_id"]
+        assert run_id != "card1"  # run_id should be different from card_id
+
+        # get_output with run_id should return completed output
+        completed_output = web_server.get_output(run_id)
+        assert "first run output\n" in completed_output
+        assert "second run output\n" not in completed_output
+
+        # get_output with card_id should return running task output
+        running_output = web_server.get_output("card1")
+        assert "second run output\n" in running_output
+
     def test_completed_task_output_accessible(self, web_server):
         web_server.track_task("card1", "proj", "test", "http://example.com")
         web_server.append_output("card1", "hello\n")

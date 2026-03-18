@@ -65,22 +65,23 @@ class WebServer:
         """Remove a completed/cancelled task from tracking."""
         info = self._task_info.pop(card_id, None)
         output = self._task_output.pop(card_id, None)
-        # Preserve in completed tasks list
+        # Preserve in completed tasks list with unique run_id
         if info and output:
+            completed_at = time.time()
+            run_id = f"{card_id}_{int(completed_at)}"
             self._completed_tasks.insert(0, {
                 "card_id": card_id,
+                "run_id": run_id,
                 "project": info["project"],
                 "card_name": info["card_name"],
                 "card_url": info["card_url"],
                 "started_at": info["started_at"],
-                "completed_at": time.time(),
+                "completed_at": completed_at,
                 "output": list(output),
             })
             # Keep only last N
             if len(self._completed_tasks) > self._max_completed_tasks:
                 self._completed_tasks = self._completed_tasks[:self._max_completed_tasks]
-            # Also keep output accessible via get_output for SSE streaming
-            self._task_output[card_id] = output
         # Signal subscribers that the task is done
         for queue in self._task_output_subscribers.pop(card_id, []):
             queue.put_nowait(None)
@@ -101,14 +102,19 @@ class WebServer:
         for queue in subs:
             queue.put_nowait(line)
 
-    def get_output(self, card_id: str) -> list[str]:
-        """Get all buffered output lines for a task (running or completed)."""
-        buf = self._task_output.get(card_id)
+    def get_output(self, task_id: str) -> list[str]:
+        """Get all buffered output lines for a task (running or completed).
+
+        Args:
+            task_id: Either a card_id (for running tasks) or a run_id (for completed tasks)
+        """
+        # Check running tasks first (card_id match)
+        buf = self._task_output.get(task_id)
         if buf is not None:
             return list(buf)
-        # Check completed tasks
+        # Check completed tasks by run_id, then by card_id
         for task in self._completed_tasks:
-            if task["card_id"] == card_id:
+            if task.get("run_id") == task_id or task["card_id"] == task_id:
                 return list(task.get("output", []))
         return []
 
@@ -117,6 +123,7 @@ class WebServer:
         return [
             {
                 "card_id": t["card_id"],
+                "run_id": t.get("run_id", t["card_id"]),
                 "project": t["project"],
                 "card_name": t["card_name"],
                 "card_url": t["card_url"],
@@ -419,16 +426,20 @@ class WebServer:
             )
 
     async def _handle_stream(self, request: web.Request) -> web.StreamResponse:
-        card_id = request.match_info["card_id"]
-        is_running = card_id in self._task_info
-        is_completed = any(t["card_id"] == card_id for t in self._completed_tasks)
+        task_id = request.match_info["card_id"]  # Can be card_id or run_id
+        is_running = task_id in self._task_info
+        is_completed = any(
+            t.get("run_id") == task_id or t["card_id"] == task_id
+            for t in self._completed_tasks
+        )
         if not is_running and not is_completed:
-            logger.debug("SSE stream: card %s not found", card_id[:8])
+            logger.debug("SSE stream: task %s not found", task_id[:8])
             return web.json_response({"error": "Task not found"}, status=404)
+        card_id = task_id  # For running task subscriber lookup
 
         logger.debug(
-            "SSE stream: connecting for card %s, buffer has %d lines",
-            card_id[:8], len(self._task_output.get(card_id, [])),
+            "SSE stream: connecting for task %s (running=%s, completed=%s)",
+            task_id[:8], is_running, is_completed,
         )
 
         response = web.StreamResponse(
@@ -441,7 +452,7 @@ class WebServer:
         await response.prepare(request)
 
         # Send existing buffered output
-        existing = self.get_output(card_id)
+        existing = self.get_output(task_id)
         logger.debug("SSE stream: sending %d existing lines", len(existing))
         for line in existing:
             await response.write(f"data: {line}\n".encode())
@@ -479,6 +490,7 @@ class WebServer:
         for t in self._completed_tasks:
             completed.append({
                 "card_id": t["card_id"],
+                "run_id": t.get("run_id", t["card_id"]),
                 "project": t["project"],
                 "card_name": t["card_name"],
                 "card_url": t["card_url"],

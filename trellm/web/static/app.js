@@ -253,7 +253,8 @@
                 ? '<a href="' + t.card_url + '" target="_blank">' + escapeHtml(t.card_name) + '</a>'
                 : escapeHtml(t.card_name);
             var lineCount = t.output_lines ? ' (' + t.output_lines + ')' : '';
-            var viewBtn = '<button class="btn-stream" onclick="viewCompletedOutput(\'' + t.card_id + '\', \'' + escapeHtml(t.card_name).replace(/'/g, "\\'") + '\')">View' + lineCount + '</button>';
+            var runId = t.run_id || t.card_id;
+            var viewBtn = '<button class="btn-stream" onclick="viewCompletedOutput(\'' + runId + '\', \'' + escapeHtml(t.card_name).replace(/'/g, "\\'") + '\')">View' + lineCount + '</button>';
             var ago = formatDuration(t.completed_ago_seconds) + ' ago';
             return '<tr><td>' + escapeHtml(t.project) + '</td><td>' + link + '</td><td>' + formatDuration(t.duration_seconds) + '</td><td>' + ago + '</td><td>' + viewBtn + '</td></tr>';
         }).join("");
