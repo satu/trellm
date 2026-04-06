@@ -1,29 +1,32 @@
 #!/bin/bash
-# Install or uninstall trellm as a systemd user service.
+# Install or uninstall trellm as a systemd service.
 #
 # Usage:
-#   ./systemd-install.sh          # Install and enable
-#   ./systemd-install.sh install   # Install and enable
-#   ./systemd-install.sh uninstall # Stop, disable, and remove
+#   sudo ./systemd-install.sh          # Install and enable
+#   sudo ./systemd-install.sh install   # Install and enable
+#   sudo ./systemd-install.sh uninstall # Remove service
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE_NAME="trellm"
-SERVICE_FILE="$HOME/.config/systemd/user/${SERVICE_NAME}.service"
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 TEMPLATE="$SCRIPT_DIR/trellm.service"
 VENV_DIR="$SCRIPT_DIR/.venv"
-CURRENT_USER="$(whoami)"
+
+# Determine the user who owns the project directory (handles both sudo and direct run)
+TRELLM_USER="$(stat -c '%U' "$SCRIPT_DIR")"
+TRELLM_HOME="$(eval echo "~$TRELLM_USER")"
 
 do_install() {
     # Ensure venv exists and trellm is installed
     if [ ! -d "$VENV_DIR" ]; then
         echo "Creating virtual environment..."
-        python3 -m venv "$VENV_DIR"
+        sudo -u "$TRELLM_USER" python3 -m venv "$VENV_DIR"
     fi
 
     echo "Installing trellm in editable mode..."
-    "$VENV_DIR/bin/pip" install -q -e "$SCRIPT_DIR"
+    sudo -u "$TRELLM_USER" "$VENV_DIR/bin/pip" install -q -e "$SCRIPT_DIR"
 
     # Verify the entrypoint exists
     if [ ! -x "$VENV_DIR/bin/trellm" ]; then
@@ -32,57 +35,51 @@ do_install() {
     fi
 
     # Generate service file from template
-    mkdir -p "$(dirname "$SERVICE_FILE")"
     sed -e "s|TRELLM_VENV|$VENV_DIR|g" \
         -e "s|TRELLM_DIR|$SCRIPT_DIR|g" \
+        -e "s|TRELLM_USER|$TRELLM_USER|g" \
+        -e "s|TRELLM_HOME|$TRELLM_HOME|g" \
         "$TEMPLATE" > "$SERVICE_FILE"
 
     echo "Installed $SERVICE_FILE"
 
     # Check if systemd is running
-    if ! systemctl --user --no-pager status >/dev/null 2>&1; then
+    if ! systemctl --no-pager status >/dev/null 2>&1; then
         echo ""
         echo "Service file installed, but systemd is not available."
         echo "On a systemd-based system, run:"
-        echo "  systemctl --user daemon-reload"
-        echo "  systemctl --user enable --now trellm"
-        echo "  loginctl enable-linger $CURRENT_USER"
+        echo "  sudo systemctl daemon-reload"
+        echo "  sudo systemctl enable --now trellm"
         return
     fi
 
-    # Enable lingering so user services start at boot (not just at login)
-    if ! loginctl show-user "$CURRENT_USER" --property=Linger 2>/dev/null | grep -q "yes"; then
-        echo "Enabling lingering for $CURRENT_USER (allows service to start at boot)..."
-        loginctl enable-linger "$CURRENT_USER"
-    fi
-
     # Reload and enable
-    systemctl --user daemon-reload
-    systemctl --user enable "$SERVICE_NAME"
-    systemctl --user start "$SERVICE_NAME"
+    systemctl daemon-reload
+    systemctl enable "$SERVICE_NAME"
+    systemctl start "$SERVICE_NAME"
 
     echo ""
     echo "trellm service installed and started."
     echo ""
     echo "Useful commands:"
-    echo "  systemctl --user status trellm    # Check status"
-    echo "  journalctl --user -u trellm -f    # Follow logs"
-    echo "  systemctl --user restart trellm   # Restart"
-    echo "  systemctl --user stop trellm      # Stop"
-    echo "  ./systemd-install.sh uninstall    # Remove service"
+    echo "  systemctl status trellm         # Check status"
+    echo "  journalctl -u trellm -f         # Follow logs"
+    echo "  sudo systemctl restart trellm   # Restart"
+    echo "  sudo systemctl stop trellm      # Stop"
+    echo "  sudo ./systemd-install.sh uninstall  # Remove service"
 }
 
 do_uninstall() {
     echo "Stopping and disabling trellm service..."
-    systemctl --user stop "$SERVICE_NAME" 2>/dev/null || true
-    systemctl --user disable "$SERVICE_NAME" 2>/dev/null || true
+    systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+    systemctl disable "$SERVICE_NAME" 2>/dev/null || true
 
     if [ -f "$SERVICE_FILE" ]; then
         rm "$SERVICE_FILE"
         echo "Removed $SERVICE_FILE"
     fi
 
-    systemctl --user daemon-reload
+    systemctl daemon-reload
     echo "trellm service uninstalled."
 }
 

@@ -42,20 +42,20 @@ python -m trellm
 
 ### Option 4: Run as a systemd service
 
-Install trellm as a systemd user service that starts automatically at boot:
+Install trellm as a systemd service that starts automatically at boot:
 
 ```bash
 cd ~/src/trellm
-./systemd-install.sh
+sudo ./systemd-install.sh
 ```
 
-This will create a virtual environment (if needed), install trellm, enable the service, and start it. The service persists across reboots via `loginctl enable-linger`.
+This will create a virtual environment (if needed), install trellm, enable the service, and start it. The service starts automatically on every boot.
 
 ```bash
-systemctl --user status trellm     # Check status
-journalctl --user -u trellm -f    # Follow logs
-systemctl --user restart trellm   # Restart after config changes
-./systemd-install.sh uninstall    # Remove the service
+systemctl status trellm              # Check status
+journalctl -u trellm -f             # Follow logs
+sudo systemctl restart trellm       # Restart after config changes
+sudo ./systemd-install.sh uninstall # Remove the service
 ```
 
 ## Configuration

@@ -27,6 +27,8 @@ class TestServiceTemplate:
         content = SERVICE_TEMPLATE.read_text()
         assert "TRELLM_VENV" in content
         assert "TRELLM_DIR" in content
+        assert "TRELLM_USER" in content
+        assert "TRELLM_HOME" in content
 
     def test_template_exec_start_uses_venv_binary(self):
         content = SERVICE_TEMPLATE.read_text()
@@ -40,9 +42,17 @@ class TestServiceTemplate:
         content = SERVICE_TEMPLATE.read_text()
         assert "After=network-online.target" in content
 
-    def test_template_targets_user_default(self):
+    def test_template_targets_multi_user(self):
         content = SERVICE_TEMPLATE.read_text()
-        assert "WantedBy=default.target" in content
+        assert "WantedBy=multi-user.target" in content
+
+    def test_template_has_user_directive(self):
+        content = SERVICE_TEMPLATE.read_text()
+        assert "User=TRELLM_USER" in content
+
+    def test_template_sets_home(self):
+        content = SERVICE_TEMPLATE.read_text()
+        assert "Environment=HOME=TRELLM_HOME" in content
 
     def test_template_sets_path(self):
         content = SERVICE_TEMPLATE.read_text()
@@ -53,11 +63,17 @@ class TestServiceTemplate:
         content = SERVICE_TEMPLATE.read_text()
         result = content.replace("TRELLM_VENV", "/home/user/src/trellm/.venv")
         result = result.replace("TRELLM_DIR", "/home/user/src/trellm")
+        result = result.replace("TRELLM_USER", "user")
+        result = result.replace("TRELLM_HOME", "/home/user")
         assert "ExecStart=/home/user/src/trellm/.venv/bin/trellm" in result
         assert "WorkingDirectory=/home/user/src/trellm" in result
+        assert "User=user" in result
+        assert "Environment=HOME=/home/user" in result
         # No remaining placeholders
         assert "TRELLM_VENV" not in result
         assert "TRELLM_DIR" not in result
+        assert "TRELLM_USER" not in result
+        assert "TRELLM_HOME" not in result
 
 
 class TestInstallScript:
@@ -85,14 +101,15 @@ class TestInstallScript:
         content = INSTALL_SCRIPT.read_text()
         assert "do_uninstall" in content
 
-    def test_script_enables_linger(self):
-        """Service should enable lingering for boot-time start."""
+    def test_script_installs_to_system_dir(self):
         content = INSTALL_SCRIPT.read_text()
-        assert "enable-linger" in content
+        assert "/etc/systemd/system" in content
 
-    def test_script_installs_to_user_systemd_dir(self):
+    def test_script_detects_owner(self):
+        """Script should determine the user from the project directory owner."""
         content = INSTALL_SCRIPT.read_text()
-        assert ".config/systemd/user" in content
+        assert "stat" in content
+        assert "TRELLM_USER" in content
 
     def test_script_invalid_command_exits_nonzero(self):
         result = subprocess.run(

@@ -5,13 +5,15 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=TRELLM_USER
 ExecStart=TRELLM_VENV/bin/trellm
 Restart=on-failure
 RestartSec=10
 WorkingDirectory=TRELLM_DIR
 
 # Ensure PATH includes common locations for claude, node, etc.
-Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=TRELLM_HOME/.local/bin:TRELLM_HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=TRELLM_HOME
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
