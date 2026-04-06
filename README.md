@@ -40,22 +40,25 @@ pip install aiohttp pyyaml
 python -m trellm
 ```
 
-### Option 4: Run as a systemd service
+### Option 4: Run as a service (Docker / entrypoint)
 
-Install trellm as a systemd service that starts automatically at boot:
+Start trellm as a long-running background process with logging:
 
 ```bash
 cd ~/src/trellm
-sudo ./systemd-install.sh
+./start-trellm.sh          # Background, logs to /var/log/trellm.log
+./start-trellm.sh --fg     # Foreground (for debugging)
 ```
 
-This will create a virtual environment (if needed), install trellm, enable the service, and start it. The service starts automatically on every boot.
+Add to a Docker entrypoint:
+```bash
+/home/user/src/trellm/start-trellm.sh &
+```
 
 ```bash
-systemctl status trellm              # Check status
-journalctl -u trellm -f             # Follow logs
-sudo systemctl restart trellm       # Restart after config changes
-sudo ./systemd-install.sh uninstall # Remove the service
+tail -f /var/log/trellm.log    # Follow logs
+cat /var/run/trellm.pid        # Check PID
+kill $(cat /var/run/trellm.pid) # Stop
 ```
 
 ## Configuration
