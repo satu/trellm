@@ -13,6 +13,7 @@ SERVICE_NAME="trellm"
 SERVICE_FILE="$HOME/.config/systemd/user/${SERVICE_NAME}.service"
 TEMPLATE="$SCRIPT_DIR/trellm.service"
 VENV_DIR="$SCRIPT_DIR/.venv"
+CURRENT_USER="$(whoami)"
 
 do_install() {
     # Ensure venv exists and trellm is installed
@@ -38,10 +39,21 @@ do_install() {
 
     echo "Installed $SERVICE_FILE"
 
+    # Check if systemd is running
+    if ! systemctl --user --no-pager status >/dev/null 2>&1; then
+        echo ""
+        echo "Service file installed, but systemd is not available."
+        echo "On a systemd-based system, run:"
+        echo "  systemctl --user daemon-reload"
+        echo "  systemctl --user enable --now trellm"
+        echo "  loginctl enable-linger $CURRENT_USER"
+        return
+    fi
+
     # Enable lingering so user services start at boot (not just at login)
-    if ! loginctl show-user "$USER" --property=Linger 2>/dev/null | grep -q "yes"; then
-        echo "Enabling lingering for $USER (allows service to start at boot)..."
-        loginctl enable-linger "$USER"
+    if ! loginctl show-user "$CURRENT_USER" --property=Linger 2>/dev/null | grep -q "yes"; then
+        echo "Enabling lingering for $CURRENT_USER (allows service to start at boot)..."
+        loginctl enable-linger "$CURRENT_USER"
     fi
 
     # Reload and enable
