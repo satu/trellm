@@ -1,0 +1,17 @@
+[Unit]
+Description=TreLLM - Trello to Claude Code automation
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=TRELLM_VENV/bin/trellm
+Restart=on-failure
+RestartSec=10
+WorkingDirectory=TRELLM_DIR
+
+# Ensure PATH includes common locations for claude, node, etc.
+Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target
