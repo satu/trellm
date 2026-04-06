@@ -22,12 +22,13 @@ trellm -v              # Verbose logging
 
 TreLLM is a polling-based automation tool that bridges Trello boards with Claude Code:
 
-- **`__main__.py`**: Entry point with polling loop, command-line argument parsing, and main orchestration
-- **`claude.py`**: Subprocess-based Claude Code integration using `asyncio.create_subprocess_exec`
+- **`__main__.py`**: Entry point with polling loop, command-line argument parsing, abort/restart command handlers, and web server lifecycle management
+- **`claude.py`**: Subprocess-based Claude Code integration using `asyncio.create_subprocess_exec`, with `output_callback` support for live streaming
 - **`trello.py`**: Async Trello API client using `aiohttp`
 - **`config.py`**: Dataclass-based configuration with file + environment variable loading
 - **`state.py`**: JSON-based state persistence for session IDs, ticket counts, and maintenance timestamps
 - **`maintenance.py`**: Periodic maintenance skill that runs every N tickets
+- **`web/server.py`**: Embedded aiohttp web dashboard with REST API, SSE streaming, usage caching, and task history
 
 ## Key Patterns
 
@@ -79,6 +80,21 @@ def get_maintenance_config(self, project: str) -> Optional[MaintenanceConfig]:
     return self.claude.maintenance  # Fall back to global
 ```
 
+### Live Output Streaming
+`claude.py` supports an `output_callback` for streaming parsed stdout (text, thinking, tool results) to SSE clients. When set, it enables `--output-format stream-json` and forwards decoded output to the web dashboard:
+```python
+async def run(self, ..., output_callback: Optional[callable] = None) -> ClaudeResult:
+```
+
+### Usage API Rate Limiting
+The web dashboard caches usage data with a 5-minute cooldown between API calls, persisted across restarts via the state file:
+```python
+self._usage_cooldown = 300  # Minimum seconds between API calls
+persisted = self.state.state.get("usage_cache", {})
+self._usage_cache: Optional[dict] = persisted.get("data")
+```
+Don't cache 429 errors — allow retry on next request. Use Claude Code's `User-Agent` header.
+
 ### State Management
 `StateManager` uses JSON persistence:
 - Session IDs are updated after each Claude interaction
@@ -98,13 +114,19 @@ def get_maintenance_config(self, project: str) -> Optional[MaintenanceConfig]:
 
 5. **Timeout handling** - Claude tasks can take a long time. Default timeout is 20 minutes (1200 seconds) but maintenance tasks use 10 minutes (600 seconds).
 
+6. **Usage API 429** - The Anthropic usage API requires the correct `User-Agent` header (matching Claude Code's version) and aggressive rate limiting (5-minute cooldown). Caching failures or starting cooldown on errors causes cascading issues.
+
+7. **Stale session IDs** - Sessions can become invalid (e.g., after Claude Code updates). `claude.py` detects "session not found" errors via `SESSION_NOT_FOUND_PATTERN` and retries without the session ID.
+
 ## Testing
 
 Tests mirror the source structure in `tests/`:
 - `test_claude.py` - Claude subprocess integration tests
 - `test_config.py` - Configuration loading tests
+- `test_main.py` - Command handlers (abort, restart, reset-session) and polling loop tests
 - `test_maintenance.py` - Maintenance skill tests
 - `test_state.py` - State persistence tests
 - `test_trello.py` - Trello API client tests
+- `test_web.py` - Web dashboard API, SSE streaming, usage caching tests
 
 Use `pytest` with fixtures for async tests. Mock subprocess calls to avoid actual Claude invocations.

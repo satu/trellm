@@ -148,6 +148,33 @@ Runs the maintenance skill which:
 - Checks for documentation gaps
 - Posts findings as a comment and creates/updates a maintenance card in ICE BOX
 
+### /abort
+Cancel all currently running tasks.
+
+```
+trellm /abort
+```
+
+Cancels all in-progress Claude Code subprocesses, moves any pending TODO cards back, and posts status comments on affected cards.
+
+### /restart
+Restart the TreLLM polling loop.
+
+```
+trellm /restart
+```
+
+Performs an abort of all running tasks, then restarts the entire polling loop with a fresh state. Useful after configuration changes.
+
+### /reset-session
+Clear a project's stored session ID to start fresh.
+
+```
+myproject /reset-session
+```
+
+Removes the persisted session ID for the specified project, causing the next task to start a new Claude Code session instead of resuming the old one. Useful when sessions become stale or corrupted.
+
 ## Maintenance
 
 TreLLM can automatically run periodic maintenance to keep project context fresh.
@@ -190,3 +217,28 @@ trello:
 ```
 
 Maintenance will create cards named `{project} regular maintenance` with recommendations.
+
+## Web Dashboard
+
+TreLLM includes an embedded web dashboard for real-time monitoring and control.
+
+### Configuration
+
+Enable the dashboard in your config:
+
+```yaml
+web:
+  enabled: true
+  host: "0.0.0.0"    # Listen address (default: 0.0.0.0)
+  port: 8077          # Port (default: 8077)
+```
+
+### Features
+
+- **Status overview**: Polling state, uptime, configured projects
+- **Running tasks**: Currently processing cards with project, duration, and card links
+- **Live output streaming**: Real-time Claude Code output via SSE while tasks run
+- **Task history**: Last 10 completed tasks with full output
+- **Stats dashboard**: Per-project and aggregate cost, token usage, card counts
+- **Control actions**: Abort and restart buttons (equivalent to `/abort` and `/restart` commands)
+- **Usage limits**: Cached Anthropic API usage data with 5-minute cooldown

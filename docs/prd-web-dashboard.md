@@ -1,4 +1,6 @@
-# TreLLM Web Dashboard — Mini PRD
+# TreLLM Web Dashboard — Mini PRD (Completed)
+
+> **Status: Fully implemented.** All 4 phases are complete. Output retention: 10 tasks; streaming: SSE (not WebSocket). See README.md for user-facing documentation.
 
 ## Problem
 
@@ -144,8 +146,8 @@ trellm/
 - Add config viewer
 - Improve UI styling
 
-## Open Questions
+## Open Questions (Resolved)
 
-1. **Should the dashboard be accessible on LAN?** Default is localhost-only, but exposing on `0.0.0.0` could be useful for checking from a phone. If so, should we add basic auth?
-2. **Output retention**: How much stdout/stderr to keep in memory per task? Propose 1MB cap per task, last 10 tasks.
-3. **Should stats auto-refresh use SSE push or client-side polling?** SSE is more efficient but adds complexity in Phase 1. Proposal: start with client polling, upgrade to SSE in Phase 3.
+1. **Should the dashboard be accessible on LAN?** Resolved: Default is `0.0.0.0` (LAN-accessible). No auth added — single-user tool.
+2. **Output retention**: Resolved: 5000 lines per task, last 10 completed tasks retained in memory.
+3. **Should stats auto-refresh use SSE push or client-side polling?** Resolved: SSE for live output streaming; client polling for stats refresh.
