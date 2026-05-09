@@ -74,10 +74,12 @@
 
         tbody.innerHTML = data.tasks.map(function(t) {
             const link = t.card_url
-                ? '<a href="' + t.card_url + '" target="_blank">' + escapeHtml(t.card_name) + '</a>'
+                ? '<a href="' + escapeHtml(t.card_url) + '" target="_blank">' + escapeHtml(t.card_name) + '</a>'
                 : escapeHtml(t.card_name);
             var lineCount = t.output_lines ? ' (' + t.output_lines + ')' : '';
-            var streamBtn = '<button class="btn-stream" onclick="viewOutput(\'' + t.card_id + '\', \'' + escapeHtml(t.card_name).replace(/'/g, "\\'") + '\')">View' + lineCount + '</button>';
+            var streamBtn = '<button class="btn-stream" data-action="view-active"'
+                + ' data-card-id="' + escapeHtml(t.card_id) + '"'
+                + ' data-card-name="' + escapeHtml(t.card_name) + '">View' + lineCount + '</button>';
             return '<tr><td>' + escapeHtml(t.project) + '</td><td>' + link + '</td><td>' + formatDuration(t.duration_seconds) + '</td><td>' + streamBtn + '</td></tr>';
         }).join("");
     }
@@ -235,9 +237,15 @@
     }
 
     function escapeHtml(str) {
-        var d = document.createElement("div");
-        d.textContent = str || "";
-        return d.innerHTML;
+        // Used for both element content AND attribute values, so " and ' must
+        // be escaped — otherwise card names with " (e.g. "trellm clicking on
+        // \"view\" ...") terminate attribute values and break click handlers.
+        return String(str == null ? "" : str)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#39;");
     }
 
     function renderCompleted(data) {
@@ -250,11 +258,13 @@
         section.classList.remove("hidden");
         tbody.innerHTML = data.completed.map(function(t) {
             var link = t.card_url
-                ? '<a href="' + t.card_url + '" target="_blank">' + escapeHtml(t.card_name) + '</a>'
+                ? '<a href="' + escapeHtml(t.card_url) + '" target="_blank">' + escapeHtml(t.card_name) + '</a>'
                 : escapeHtml(t.card_name);
             var lineCount = t.output_lines ? ' (' + t.output_lines + ')' : '';
             var runId = t.run_id || t.card_id;
-            var viewBtn = '<button class="btn-stream" onclick="viewCompletedOutput(\'' + runId + '\', \'' + escapeHtml(t.card_name).replace(/'/g, "\\'") + '\')">View' + lineCount + '</button>';
+            var viewBtn = '<button class="btn-stream" data-action="view-completed"'
+                + ' data-run-id="' + escapeHtml(runId) + '"'
+                + ' data-card-name="' + escapeHtml(t.card_name) + '">View' + lineCount + '</button>';
             var ago = formatDuration(t.completed_ago_seconds) + ' ago';
             return '<tr><td>' + escapeHtml(t.project) + '</td><td>' + link + '</td><td>' + formatDuration(t.duration_seconds) + '</td><td>' + ago + '</td><td>' + viewBtn + '</td></tr>';
         }).join("");
@@ -282,6 +292,21 @@
             badge.className = "badge error";
         }
     }
+
+    // Delegated click handler for the View buttons. Inline onclick="..."
+    // attributes used to interpolate card titles directly, which broke
+    // for any title containing a literal " (e.g. ... clicking on "view"...).
+    document.addEventListener("click", function(e) {
+        var btn = e.target.closest("button.btn-stream");
+        if (!btn) return;
+        var action = btn.getAttribute("data-action");
+        var name = btn.getAttribute("data-card-name") || "";
+        if (action === "view-active") {
+            window.viewOutput(btn.getAttribute("data-card-id"), name);
+        } else if (action === "view-completed") {
+            window.viewCompletedOutput(btn.getAttribute("data-run-id"), name);
+        }
+    });
 
     // Tab switching
     document.addEventListener("click", function(e) {

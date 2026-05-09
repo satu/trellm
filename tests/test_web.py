@@ -349,6 +349,48 @@ class TestWebServerPWAAssets:
         assert im.getpixel((256, 256)) != brand_bg
 
 
+class TestDashboardJSSafety:
+    """Regression tests for the dashboard JS button rendering.
+
+    The original bug: card names containing a literal ``"`` (the bug
+    report card itself was titled ``... clicking on "view" on the
+    dashboard ...``) were interpolated raw into ``onclick="viewOutput(...)"``
+    attributes, terminating the attribute mid-value and silently breaking
+    the click handler. Card titles come from Trello and are arbitrary
+    user input, so the dashboard must not interpolate them into HTML
+    attribute values.
+    """
+
+    async def test_view_buttons_use_data_attributes_not_inline_onclick(self, client):
+        resp = await client.get("/static/app.js")
+        body = await resp.text()
+        # Inline onclick handlers that interpolate card_name break for any
+        # title containing ``"`` — switched to data-* attributes + delegated
+        # click listeners.
+        assert 'onclick="viewOutput(' not in body, (
+            "View button still uses inline onclick — breaks for card "
+            "names containing double quotes"
+        )
+        assert 'onclick="viewCompletedOutput(' not in body, (
+            "Completed View button still uses inline onclick"
+        )
+        # Positive marker that the new event-delegation pattern is in place.
+        assert "data-card-id" in body
+
+    async def test_escape_html_escapes_double_quotes(self, client):
+        """``escapeHtml`` is now used for HTML attribute values, so it
+        must escape ``"`` (otherwise card names with quotes still corrupt
+        ``data-card-name="..."`` attributes)."""
+        resp = await client.get("/static/app.js")
+        body = await resp.text()
+        # Either an explicit ``"`` -> ``&quot;`` (string-replace style) or
+        # a documented attribute-safe escape — both forms count.
+        assert "&quot;" in body, (
+            "escapeHtml does not appear to escape \" — attribute injection "
+            "via card names containing double quotes is still possible"
+        )
+
+
 class TestPullToRefresh:
     """Tests for the iOS-standalone pull-to-refresh hack."""
 
