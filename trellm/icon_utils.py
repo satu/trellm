@@ -16,10 +16,13 @@ def _require_pil():
     return Image
 
 
-WHITE_THRESHOLD = 240   # pixel is "non-content" when every RGB channel >= this
-EDGE_LOW = 200          # below this, alpha stays at 255 (fully opaque)
-EDGE_HIGH = 240         # at/above this, alpha goes to 0 in the flood region
-FLOOD_TOLERANCE = 235   # flood-fill expands while min(r,g,b) >= this
+WHITE_THRESHOLD = 240    # pixel is "non-content" when every RGB channel >= this
+DARK_THRESHOLD = 120     # min(rgb) below this = solid icon, flood stops, alpha kept
+LIGHT_THRESHOLD = 180    # min(rgb) above this in flood region = alpha 0
+                         # (180 sits above plausible icon body values and below
+                         # the leading edge of typical drop-shadow gradients,
+                         # so shadows fade to invisible)
+DEFAULT_ALPHA_TRIM = 20  # ignore pixels with alpha at/below this when trimming
 
 
 def trim_to_content(im: "_Image", threshold: int = WHITE_THRESHOLD) -> "_Image":
@@ -54,18 +57,28 @@ def trim_to_content(im: "_Image", threshold: int = WHITE_THRESHOLD) -> "_Image":
 
 def alpha_key_corners(
     im: "_Image",
-    edge_low: int = EDGE_LOW,
-    edge_high: int = EDGE_HIGH,
-    flood_tolerance: int = FLOOD_TOLERANCE,
+    dark_thr: int = DARK_THRESHOLD,
+    light_thr: int = LIGHT_THRESHOLD,
 ) -> "_Image":
-    """Make corner-connected near-white background transparent.
+    """Make the outer canvas (and any drop shadow) transparent.
 
-    A 4-connected flood fill from the four corners marks the "outside" region.
-    Inside that region, alpha falls off smoothly between ``edge_low`` (kept
-    fully opaque) and ``edge_high`` (fully transparent), so anti-aliased
-    edges around a rounded shape stay smooth instead of getting a hard ring.
-    Any near-white pixels not reachable from a corner — for example, white
-    highlights inside the icon — keep their original alpha.
+    A 4-connected flood from the four corners walks every pixel where
+    ``min(r, g, b) > dark_thr`` — that's the white page background, the
+    soft drop shadow that fades into it, and the outermost ring of an
+    anti-aliased icon edge. The flood stops as soon as it hits a pixel
+    whose ``min(r, g, b) <= dark_thr`` — the icon's solid interior.
+
+    Inside the flood region, alpha is set on a smooth ramp:
+
+      * ``min(rgb) <= dark_thr`` → fully opaque (``alpha = 255``); these
+        pixels are the boundary, the flood does not enter them.
+      * ``min(rgb) >= light_thr`` → fully transparent (``alpha = 0``).
+      * In between → linear fade.
+
+    The ramp covers exactly the band where a soft drop shadow sits, so it
+    fades into nothing instead of leaving a dark halo. Pixels not reached
+    by the flood — either icon body or whites surrounded by darker
+    content — are left untouched, so isolated highlights stay visible.
     """
     _require_pil()
     rgba = im.convert("RGBA")
@@ -76,7 +89,7 @@ def alpha_key_corners(
     stack = deque()
     for sx, sy in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)):
         r, g, b, _ = pixels[sx, sy]
-        if min(r, g, b) >= flood_tolerance:
+        if min(r, g, b) > dark_thr:
             stack.append((sx, sy))
 
     while stack:
@@ -85,7 +98,7 @@ def alpha_key_corners(
         if in_flood[idx]:
             continue
         r, g, b, _ = pixels[x, y]
-        if min(r, g, b) < flood_tolerance:
+        if min(r, g, b) <= dark_thr:
             continue
         in_flood[idx] = 1
         if x > 0:
@@ -97,7 +110,7 @@ def alpha_key_corners(
         if y < h - 1:
             stack.append((x, y + 1))
 
-    span = max(edge_high - edge_low, 1)
+    span = max(light_thr - dark_thr, 1)
     out = rgba.copy()
     out_pixels = out.load()
     for y in range(h):
@@ -107,16 +120,49 @@ def alpha_key_corners(
                 continue
             r, g, b, a = pixels[x, y]
             mn = min(r, g, b)
-            if mn >= edge_high:
+            if mn >= light_thr:
                 new_alpha = 0
-            elif mn <= edge_low:
-                new_alpha = a
             else:
-                # Linear falloff: at edge_low keep full alpha, at edge_high go to 0.
-                t = (mn - edge_low) / span
+                # Linear falloff: at dark_thr keep full alpha, at light_thr go to 0.
+                t = (mn - dark_thr) / span
                 new_alpha = int(round(a * (1.0 - t)))
             out_pixels[x, y] = (r, g, b, new_alpha)
     return out
+
+
+def trim_by_alpha(
+    im: "_Image",
+    alpha_thr: int = DEFAULT_ALPHA_TRIM,
+) -> "_Image":
+    """Crop to the bounding box of pixels whose alpha is above ``alpha_thr``.
+
+    Use this after ``alpha_key_corners`` to shed any sub-threshold remnants
+    of a faded drop shadow before squaring the icon.
+
+    Returns the image unchanged when no pixel exceeds the threshold (e.g.
+    a fully-transparent canvas), so callers don't need to special-case it.
+    """
+    _require_pil()
+    rgba = im.convert("RGBA")
+    pixels = rgba.load()
+    w, h = rgba.size
+
+    min_x, min_y, max_x, max_y = w, h, -1, -1
+    for y in range(h):
+        for x in range(w):
+            if pixels[x, y][3] > alpha_thr:
+                if x < min_x:
+                    min_x = x
+                if y < min_y:
+                    min_y = y
+                if x > max_x:
+                    max_x = x
+                if y > max_y:
+                    max_y = y
+
+    if max_x < 0:
+        return rgba
+    return rgba.crop((min_x, min_y, max_x + 1, max_y + 1))
 
 
 def make_square(

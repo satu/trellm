@@ -28,7 +28,7 @@ from trellm.icon_utils import (  # noqa: E402
     alpha_key_corners,
     make_maskable,
     make_square,
-    trim_to_content,
+    trim_by_alpha,
 )
 
 
@@ -52,9 +52,13 @@ def process(source: Path, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     raw = Image.open(source).convert("RGBA")
-    trimmed = trim_to_content(raw)
-    keyed = alpha_key_corners(trimmed)
-    cleaned = make_square(keyed)
+    # Alpha-key first (corners are still on the original white canvas, which
+    # the flood fill needs as a starting point), then trim away anything that
+    # has faded to near-transparent — that's where a drop shadow disappears
+    # to. Squaring last keeps the icon centred.
+    keyed = alpha_key_corners(raw)
+    trimmed = trim_by_alpha(keyed)
+    cleaned = make_square(trimmed)
 
     for name, size, kind in OUTPUTS:
         target = out_dir / name
