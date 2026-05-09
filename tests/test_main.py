@@ -1194,3 +1194,168 @@ class TestHandleRestartCommand:
 
         comment_arg = trello.add_comment.call_args[0][1]
         assert "1" in comment_arg  # 1 task cancelled
+
+
+class TestGlobalRateLimitPause:
+    """Tests for the global rate-limit pause that prevents busy-looping
+    when Claude reports an org/monthly usage limit."""
+
+    def setup_method(self) -> None:
+        # Reset the module-level pause between tests so they're independent.
+        from trellm import __main__ as main_mod
+        main_mod._rate_limit_pause_until = 0.0
+
+    def test_initially_not_rate_limited(self):
+        """Fresh process is not rate-limited."""
+        from trellm.__main__ import is_globally_rate_limited
+        assert is_globally_rate_limited() is False
+
+    def test_pause_globally_blocks(self):
+        """After pause_globally(60), is_globally_rate_limited returns True."""
+        from trellm.__main__ import (
+            is_globally_rate_limited,
+            pause_globally,
+        )
+        pause_globally(60)
+        assert is_globally_rate_limited() is True
+
+    def test_pause_globally_clears_after_window(self):
+        """A pause set in the past is no longer active."""
+        import time
+        from trellm import __main__ as main_mod
+        from trellm.__main__ import is_globally_rate_limited
+
+        # Simulate a pause that already expired
+        main_mod._rate_limit_pause_until = time.time() - 1
+        assert is_globally_rate_limited() is False
+
+    def test_pause_globally_does_not_shorten_existing_pause(self):
+        """If a longer pause is already active, a shorter one mustn't override it."""
+        import time
+        from trellm import __main__ as main_mod
+        from trellm.__main__ import pause_globally
+
+        long_until = time.time() + 7200  # 2h
+        main_mod._rate_limit_pause_until = long_until
+
+        pause_globally(60)  # only 1 minute
+
+        # Existing longer pause should be preserved
+        assert main_mod._rate_limit_pause_until == long_until
+
+    def test_seconds_until_resume_returns_remaining(self):
+        """seconds_until_resume returns roughly the remaining duration."""
+        from trellm.__main__ import pause_globally, seconds_until_resume
+        pause_globally(120)
+        remaining = seconds_until_resume()
+        assert 100 < remaining <= 120
+
+    def test_seconds_until_resume_is_zero_when_not_paused(self):
+        """seconds_until_resume returns 0 when not paused."""
+        from trellm.__main__ import seconds_until_resume
+        assert seconds_until_resume() == 0
+
+
+class TestProcessCardForProjectMonthlyLimit:
+    """Tests for the /process_card_for_project/ behaviour when Claude raises
+    MonthlyLimitError — must trigger the global pause without retrying."""
+
+    def setup_method(self) -> None:
+        from trellm import __main__ as main_mod
+        main_mod._rate_limit_pause_until = 0.0
+
+    def _make_config(self) -> Config:
+        return Config(
+            trello=TrelloConfig(
+                api_key="key", api_token="token", board_id="board",
+                todo_list_id="todo", ready_to_try_list_id="ready",
+            ),
+            claude=ClaudeConfig(
+                binary="claude", timeout=60,
+                projects={
+                    "testproject": ProjectConfig(working_dir="/tmp/testproject"),
+                },
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_monthly_limit_triggers_global_pause(self, tmp_path):
+        """When ClaudeRunner raises MonthlyLimitError, the polling loop
+        must enter a global pause so it stops retrying the same card."""
+        from trellm.state import StateManager
+        from trellm.claude import MonthlyLimitError
+        from trellm.__main__ import (
+            process_card_for_project,
+            is_globally_rate_limited,
+        )
+
+        state = StateManager(str(tmp_path / "state.json"))
+        config = self._make_config()
+
+        card = TrelloCard(
+            id="abc123",
+            name="testproject do thing",
+            description="",
+            url="https://trello.com/c/abc123",
+            last_activity="2026-01-24T10:00:00Z",
+        )
+
+        trello = MagicMock()
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+
+        claude = MagicMock()
+        # No reset_seconds — exercises the default-pause fallback
+        claude.run = AsyncMock(side_effect=MonthlyLimitError("hit limit"))
+
+        result = await process_card_for_project(
+            card=card,
+            project="testproject",
+            trello=trello,
+            state=state,
+            claude=claude,
+            config=config,
+        )
+
+        # Card was not processed (None returned), but the global pause is set
+        assert result is None
+        assert is_globally_rate_limited() is True
+
+    @pytest.mark.asyncio
+    async def test_monthly_limit_does_not_mark_card_processed(self, tmp_path):
+        """The card must NOT be marked processed — once the pause clears,
+        we want to try again (the limit may have reset)."""
+        from trellm.state import StateManager
+        from trellm.claude import MonthlyLimitError
+        from trellm.__main__ import process_card_for_project
+
+        state = StateManager(str(tmp_path / "state.json"))
+        config = self._make_config()
+
+        card = TrelloCard(
+            id="abc123",
+            name="testproject do thing",
+            description="",
+            url="https://trello.com/c/abc123",
+            last_activity="2026-01-24T10:00:00Z",
+        )
+
+        trello = MagicMock()
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+
+        claude = MagicMock()
+        claude.run = AsyncMock(side_effect=MonthlyLimitError("hit limit"))
+
+        await process_card_for_project(
+            card=card,
+            project="testproject",
+            trello=trello,
+            state=state,
+            claude=claude,
+            config=config,
+        )
+
+        assert state.is_processed("abc123") is False
+        # Should not have been moved to ready either
+        trello.move_to_ready.assert_not_called()

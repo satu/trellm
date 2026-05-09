@@ -11,9 +11,11 @@ from trellm.claude import (
     ClaudeRunner,
     ClaudeResult,
     CostInfo,
+    MonthlyLimitError,
     PromptTooLongError,
     RateLimitError,
     SessionNotFoundError,
+    MONTHLY_LIMIT_PATTERN,
     PROMPT_TOO_LONG_DETAILED_PATTERN,
     PROMPT_TOO_LONG_SIMPLE_PATTERN,
     RATE_LIMIT_PATTERN,
@@ -346,6 +348,34 @@ class TestErrorPatterns:
         assert match.group(2) == "30"
         assert match.group(3) == "pm"
 
+    def test_monthly_limit_pattern_org(self):
+        """Test detection of org's monthly usage limit message."""
+        # Actual message observed when Claude org hits the monthly cap
+        msg = "You've hit your org's monthly usage limit"
+        assert MONTHLY_LIMIT_PATTERN.search(msg) is not None
+
+    def test_monthly_limit_pattern_org_no_apostrophe(self):
+        """Test detection without apostrophe in 'orgs'."""
+        msg = "You've hit your orgs monthly usage limit"
+        assert MONTHLY_LIMIT_PATTERN.search(msg) is not None
+
+    def test_monthly_limit_pattern_case_insensitive(self):
+        """Test monthly-limit pattern is case insensitive."""
+        for msg in [
+            "You've hit your org's monthly usage limit",
+            "you've hit your org's MONTHLY usage limit",
+            "YOU'VE HIT YOUR ORG'S MONTHLY USAGE LIMIT",
+        ]:
+            assert MONTHLY_LIMIT_PATTERN.search(msg) is not None, f"Failed for: {msg}"
+
+    def test_monthly_limit_pattern_does_not_match_session_limit(self):
+        """Monthly pattern should not match the regular session/rate limits."""
+        for msg in [
+            "You've hit your limit · resets 8pm (UTC)",
+            "rate_limit_error - resets in 30 minutes",
+        ]:
+            assert MONTHLY_LIMIT_PATTERN.search(msg) is None, f"Unexpectedly matched: {msg}"
+
 
 class TestClaudeRunnerErrorChecking:
     """Tests for ClaudeRunner error detection."""
@@ -456,6 +486,35 @@ class TestClaudeRunnerErrorChecking:
 
         # Should have parsed the reset time
         assert exc_info.value.reset_seconds is not None
+
+    def test_check_for_monthly_limit_error(self, runner):
+        """Org monthly usage limit should raise MonthlyLimitError, not RateLimitError."""
+        stdout = '{"type":"result","result":"You\'ve hit your org\'s monthly usage limit"}'
+
+        with pytest.raises(MonthlyLimitError):
+            runner._check_for_errors("", stdout)
+
+    def test_monthly_limit_is_not_rate_limit_subclass(self, runner):
+        """MonthlyLimitError must NOT be a subclass of RateLimitError.
+
+        If it were, the existing retry-and-sleep loop would catch it and
+        sleep+retry forever instead of letting the error propagate so the
+        polling loop can pause globally.
+        """
+        # Issubclass check is independent of runner; using runner here only to
+        # avoid an extra fixture parameter — keeps signature consistent.
+        assert not issubclass(MonthlyLimitError, RateLimitError)
+
+    def test_monthly_limit_error_takes_precedence_over_user_pattern(self, runner):
+        """The org-monthly message contains 'hit your' too — make sure we
+        raise MonthlyLimitError, not the generic RateLimitError."""
+        stdout = '{"type":"result","result":"You\'ve hit your org\'s monthly usage limit"}'
+        try:
+            runner._check_for_errors("", stdout)
+        except MonthlyLimitError:
+            pass  # expected
+        except RateLimitError:
+            pytest.fail("Got RateLimitError; expected MonthlyLimitError")
 
     def test_no_error_on_success(self, runner):
         """Test that no error is raised on normal output."""

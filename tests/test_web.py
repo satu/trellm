@@ -807,6 +807,30 @@ class TestWebServerCompletedTasks:
         output = web_server.get_output("card1")
         assert output == ["hello\n"]
 
+    def test_failed_task_not_in_completed_list(self, web_server):
+        """Tasks that finish with success=False (e.g. org-limit failures)
+        should NOT appear in the recent-completions list — that list was
+        getting flooded with the same card 30+ times when busy-looping
+        on org limit errors."""
+        web_server.track_task("card1", "proj", "test", "http://example.com")
+        web_server.append_output("card1", "claude failed\n")
+        web_server.untrack_task("card1", success=False)
+        completed = web_server.get_completed_tasks()
+        assert completed == []
+
+    def test_failed_task_signals_subscribers(self, web_server):
+        """Failed runs must still wake up SSE subscribers so the stream
+        endpoint can close the connection cleanly."""
+        web_server.track_task("card1", "proj", "test", "http://example.com")
+        queue: asyncio.Queue = asyncio.Queue()
+        web_server._task_output_subscribers["card1"].append(queue)
+
+        web_server.untrack_task("card1", success=False)
+
+        # Subscriber should have received the None sentinel
+        assert queue.qsize() == 1
+        assert queue.get_nowait() is None
+
     @pytest.mark.asyncio
     async def test_completed_tasks_api_endpoint(self, web_server):
         web_server.track_task("card1", "proj", "test card", "http://example.com")

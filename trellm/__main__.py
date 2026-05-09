@@ -10,7 +10,7 @@ from collections import defaultdict
 from dataclasses import asdict
 from typing import Optional
 
-from .claude import ClaudeRunner, fetch_claude_usage_limits
+from .claude import ClaudeRunner, MonthlyLimitError, fetch_claude_usage_limits
 from .config import Config, load_config
 from .maintenance import run_maintenance, should_run_maintenance
 from .state import StateManager
@@ -38,6 +38,38 @@ _running_tasks: set[asyncio.Task] = set()
 
 # Web server instance (set when web dashboard is enabled)
 _web_server: Optional[WebServer] = None
+
+# Global rate-limit pause: timestamp until which the polling loop must skip
+# spawning new Claude tasks. Set when Claude reports an org/monthly usage
+# limit so we don't busy-loop the same card every poll cycle.
+_rate_limit_pause_until: float = 0.0
+# Default pause when Claude returns a monthly-limit error without a parseable
+# reset time. One hour balances "retry sooner if reset" against "don't waste
+# polls": if still limited after an hour, the next failure renews the pause.
+DEFAULT_MONTHLY_LIMIT_PAUSE_SECONDS = 3600
+
+
+def is_globally_rate_limited() -> bool:
+    """Return True if a global rate-limit pause is currently active."""
+    return _rate_limit_pause_until > time.time()
+
+
+def seconds_until_resume() -> int:
+    """Seconds until the global pause expires (0 if not paused)."""
+    remaining = _rate_limit_pause_until - time.time()
+    return max(0, int(remaining))
+
+
+def pause_globally(duration_seconds: int) -> None:
+    """Block all card processing for at least `duration_seconds` from now.
+
+    Never shortens an existing longer pause — if multiple tasks hit the
+    limit concurrently, the longest pause wins.
+    """
+    global _rate_limit_pause_until
+    target = time.time() + max(0, duration_seconds)
+    if target > _rate_limit_pause_until:
+        _rate_limit_pause_until = target
 
 
 def parse_project(card_name: str) -> str:
@@ -918,6 +950,7 @@ async def process_card_for_project(
                     )
 
         # Run Claude Code
+        succeeded = False
         try:
             # Set up output callback for web dashboard streaming
             output_cb = None
@@ -961,8 +994,24 @@ async def process_card_for_project(
             # Track this ticket for maintenance (unique tickets only)
             state.add_processed_ticket(project, card.id)
 
+            succeeded = True
             return card.id
 
+        except MonthlyLimitError as e:
+            # Org/monthly usage limit hit — pause ALL processing globally so
+            # we don't busy-loop this card (and every other project) against
+            # the same shared limit. Card is NOT marked processed so it'll
+            # be retried once the pause expires.
+            pause = e.reset_seconds or DEFAULT_MONTHLY_LIMIT_PAUSE_SECONDS
+            pause_globally(pause)
+            logger.error(
+                "[%s] Monthly/org usage limit hit on card %s. "
+                "Pausing all processing for %d seconds.",
+                project,
+                card.id,
+                pause,
+            )
+            return None
         except Exception as e:
             logger.error("[%s] Failed to process card %s: %s", project, card.id, e)
             return None
@@ -970,7 +1019,7 @@ async def process_card_for_project(
             # Always remove from processing set when done
             _processing_cards.discard(card.id)
             if _web_server:
-                _web_server.untrack_task(card.id)
+                _web_server.untrack_task(card.id, success=succeeded)
 
 
 def _task_done_callback(task: asyncio.Task) -> None:
@@ -1199,6 +1248,20 @@ async def run_polling_loop(
                             card.id,
                             parsed_name,
                             card.name[:50],
+                        )
+                        continue
+
+                    # Skip ALL regular Claude tasks while a global pause is
+                    # active (e.g. org/monthly usage limit). Commands above
+                    # — /abort, /restart, /stats, /maintenance, /reset-session —
+                    # still run because they're handled before this branch.
+                    if is_globally_rate_limited():
+                        logger.info(
+                            "[%s] Skipping card %s: global rate-limit pause "
+                            "(%ds remaining)",
+                            project,
+                            card.id,
+                            seconds_until_resume(),
                         )
                         continue
 

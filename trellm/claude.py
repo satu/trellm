@@ -37,6 +37,14 @@ PROMPT_TOO_LONG_SIMPLE_PATTERN = re.compile(r"prompt is too long", re.IGNORECASE
 RATE_LIMIT_PATTERN = re.compile(r"rate_limit_error")
 # User-facing rate limit pattern (e.g., "You've hit your limit")
 RATE_LIMIT_USER_PATTERN = re.compile(r"you've hit your limit", re.IGNORECASE)
+# Org/monthly usage limit (e.g., "You've hit your org's monthly usage limit").
+# Distinct from session rate limits because it has no parseable reset time and
+# typically lasts hours-to-weeks — busy-looping retries on this error wastes
+# polling cycles and pollutes the dashboard. The polling loop pauses globally
+# when this is hit; see MonthlyLimitError below.
+MONTHLY_LIMIT_PATTERN = re.compile(
+    r"hit your\s+org'?s?\s+monthly\s+usage\s+limit", re.IGNORECASE
+)
 # Reset time as duration (e.g., "resets in 2 hours", "resets in 30 minutes")
 RATE_LIMIT_RESET_DURATION_PATTERN = re.compile(r"resets?\s+(?:in\s+)?(\d+)\s*(hours?|minutes?|h|m|days?|d)", re.IGNORECASE)
 # Reset time as clock time (e.g., "resets 8pm (UTC)", "resets 10am")
@@ -382,6 +390,20 @@ class RateLimitError(Exception):
         self.reset_seconds = reset_seconds
 
 
+class MonthlyLimitError(Exception):
+    """Raised when Claude reports the org/monthly usage limit has been hit.
+
+    Intentionally NOT a subclass of RateLimitError so the in-process
+    retry-and-sleep loop in ClaudeRunner.run does not swallow it. The
+    polling loop catches this separately and applies a global pause —
+    monthly limits are org-wide and not worth retrying per-card.
+    """
+
+    def __init__(self, message: str, reset_seconds: Optional[int] = None):
+        super().__init__(message)
+        self.reset_seconds = reset_seconds
+
+
 class SessionNotFoundError(Exception):
     """Raised when Claude Code cannot find the session ID."""
 
@@ -445,6 +467,17 @@ class ClaudeRunner:
         # Fall back to simple pattern (no token counts)
         if PROMPT_TOO_LONG_SIMPLE_PATTERN.search(combined):
             raise PromptTooLongError("Prompt is too long", session_id=session_id)
+
+        # Check for org/monthly usage limit BEFORE generic rate-limit checks.
+        # This message lacks a parseable reset time and represents a longer
+        # outage than session rate-limits, so we surface a distinct error
+        # that bypasses the in-process retry loop.
+        if MONTHLY_LIMIT_PATTERN.search(combined):
+            reset_seconds = self._parse_rate_limit_reset_time(combined)
+            raise MonthlyLimitError(
+                "Org/monthly usage limit exceeded",
+                reset_seconds=reset_seconds,
+            )
 
         # Check for rate limit (API error or user-facing message)
         if RATE_LIMIT_PATTERN.search(combined) or RATE_LIMIT_USER_PATTERN.search(combined):

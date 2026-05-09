@@ -61,12 +61,18 @@ class WebServer:
         self._task_output[card_id] = deque(maxlen=self._output_buffer_limit)
         self._task_output_subscribers[card_id] = []
 
-    def untrack_task(self, card_id: str) -> None:
-        """Remove a completed/cancelled task from tracking."""
+    def untrack_task(self, card_id: str, success: bool = True) -> None:
+        """Remove a completed/cancelled task from tracking.
+
+        When `success` is False, the task is dropped from "recent completions"
+        — failed/cancelled runs (e.g. org limit hits) shouldn't pollute the
+        list users browse for finished work. Live subscribers are still
+        notified so /api/stream connections close cleanly.
+        """
         info = self._task_info.pop(card_id, None)
         output = self._task_output.pop(card_id, None)
-        # Preserve in completed tasks list with unique run_id
-        if info and output:
+        # Preserve only successful runs in completed tasks list
+        if success and info and output:
             completed_at = time.time()
             run_id = f"{card_id}_{int(completed_at)}"
             self._completed_tasks.insert(0, {
