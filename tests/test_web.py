@@ -269,6 +269,47 @@ class TestWebServerIndex:
         text = await resp.text()
         assert "TreLLM Dashboard" in text
 
+    async def test_index_links_pwa_manifest(self, client):
+        resp = await client.get("/")
+        text = await resp.text()
+        assert 'rel="manifest"' in text
+        assert "/static/manifest.webmanifest" in text
+
+
+class TestWebServerPWAAssets:
+    """Tests for PWA manifest and icon assets."""
+
+    async def test_manifest_served_with_correct_mime(self, client):
+        resp = await client.get("/static/manifest.webmanifest")
+        assert resp.status == 200
+        # Browsers require application/manifest+json (or json) for manifests.
+        assert resp.headers.get("Content-Type", "").startswith(
+            ("application/manifest+json", "application/json")
+        )
+        body = await resp.json()
+        assert body["name"] == "TreLLM Dashboard"
+        purposes = {icon["purpose"] for icon in body["icons"]}
+        assert "any" in purposes
+        assert "maskable" in purposes
+        for icon in body["icons"]:
+            assert icon["src"].startswith("/static/icons/")
+
+    @pytest.mark.parametrize("path", [
+        "/static/icons/icon-192.png",
+        "/static/icons/icon-512.png",
+        "/static/icons/icon-maskable-192.png",
+        "/static/icons/icon-maskable-512.png",
+        "/static/icons/apple-touch-icon.png",
+        "/static/icons/favicon-32.png",
+    ])
+    async def test_icon_assets_are_served(self, client, path):
+        resp = await client.get(path)
+        assert resp.status == 200
+        assert resp.headers.get("Content-Type") == "image/png"
+        body = await resp.read()
+        # PNG signature
+        assert body[:8] == b"\x89PNG\r\n\x1a\n"
+
 
 class TestWebServerTrackTask:
     """Tests for task tracking."""
