@@ -32,17 +32,26 @@ from trellm.icon_utils import (  # noqa: E402
 )
 
 
-# Brand-fill used for maskable icons (matches the dashboard background).
+# Brand-fill used for maskable / iOS icons (matches the dashboard background).
 BRAND_BG = (15, 17, 23, 255)
 
-# (filename, size, "transparent" | "maskable")
+# Android adaptive-icon mask cuts roughly the outer 20% of the canvas
+# (the exact crop varies by device — circle / squircle / teardrop / …),
+# so all critical content sits inside an inner-80% safe zone.
+MASKABLE_INNER_SCALE = 0.78
+
+# (filename, size, kind)
+#   "transparent" — squircle on a transparent canvas, fills the canvas.
+#   "maskable"    — squircle on brand-bg, scaled into the Android safe zone.
+#   "apple-touch" — squircle on brand-bg, fills the canvas (iOS doesn't
+#                   adaptive-mask, just rounds the corners).
 OUTPUTS: list[tuple[str, int, str]] = [
     ("icon-source.png", 0, "transparent"),     # cleaned full-resolution master
     ("icon-192.png", 192, "transparent"),
     ("icon-512.png", 512, "transparent"),
     ("icon-maskable-192.png", 192, "maskable"),
     ("icon-maskable-512.png", 512, "maskable"),
-    ("apple-touch-icon.png", 180, "maskable"),  # iOS prefers a solid bg
+    ("apple-touch-icon.png", 180, "apple-touch"),
     ("favicon-32.png", 32, "transparent"),
     ("favicon-64.png", 64, "transparent"),
 ]
@@ -65,7 +74,13 @@ def process(source: Path, out_dir: Path) -> None:
         if size == 0:
             cleaned.save(target, format="PNG", optimize=True)
         elif kind == "maskable":
-            make_maskable(cleaned, size, BRAND_BG).save(target, format="PNG", optimize=True)
+            make_maskable(
+                cleaned, size, BRAND_BG, inner_scale=MASKABLE_INNER_SCALE
+            ).save(target, format="PNG", optimize=True)
+        elif kind == "apple-touch":
+            make_maskable(cleaned, size, BRAND_BG, inner_scale=1.0).save(
+                target, format="PNG", optimize=True
+            )
         else:
             cleaned.resize((size, size), Image.LANCZOS).save(
                 target, format="PNG", optimize=True

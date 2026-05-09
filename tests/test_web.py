@@ -310,6 +310,73 @@ class TestWebServerPWAAssets:
         # PNG signature
         assert body[:8] == b"\x89PNG\r\n\x1a\n"
 
+    async def test_maskable_icon_has_safe_zone_padding(self):
+        """The Android maskable icon must keep its design inside the inner
+        80% safe zone so adaptive masks can crop without losing content.
+
+        Verifies that the corners and edge centres of the committed
+        ``icon-maskable-512.png`` are pure brand background — i.e. the
+        squircle does NOT bleed into the safe-zone margin.
+        """
+        Image = pytest.importorskip("PIL.Image")
+        from pathlib import Path
+        from PIL import Image as I  # noqa: F811
+
+        path = Path(__file__).resolve().parent.parent \
+            / "trellm/web/static/icons/icon-maskable-512.png"
+        im = I.open(path).convert("RGBA")
+        assert im.size == (512, 512)
+
+        brand_bg = (15, 17, 23, 255)
+        # Outer 10% should be solid brand background — sample 8 points.
+        margin = 16
+        samples = [
+            (margin, margin),                  # TL corner
+            (512 - margin, margin),            # TR corner
+            (margin, 512 - margin),            # BL corner
+            (512 - margin, 512 - margin),      # BR corner
+            (256, margin),                     # top edge
+            (256, 512 - margin),               # bottom edge
+            (margin, 256),                     # left edge
+            (512 - margin, 256),               # right edge
+        ]
+        for x, y in samples:
+            assert im.getpixel((x, y)) == brand_bg, (
+                f"maskable icon bleeds into safe-zone margin at ({x},{y}) "
+                f"got {im.getpixel((x, y))}"
+            )
+        # Centre is design (not background).
+        assert im.getpixel((256, 256)) != brand_bg
+
+
+class TestPullToRefresh:
+    """Tests for the iOS-standalone pull-to-refresh hack."""
+
+    async def test_index_loads_pull_to_refresh_script(self, client):
+        resp = await client.get("/")
+        text = await resp.text()
+        assert "/static/pull-to-refresh.js" in text
+
+    async def test_pull_to_refresh_script_is_served(self, client):
+        resp = await client.get("/static/pull-to-refresh.js")
+        assert resp.status == 200
+        body = await resp.text()
+        # Gated on iOS standalone — must check navigator.standalone so the
+        # hack stays out of the way on Android Chrome / desktop where native
+        # pull-to-refresh already works.
+        assert "navigator.standalone" in body
+        # Triggers a reload when the user pulls past the threshold.
+        assert "location.reload" in body
+
+    async def test_index_has_ios_standalone_meta_tags(self, client):
+        """iOS needs apple-mobile-web-app-capable for navigator.standalone
+        to ever become true, otherwise the PTR hack never activates."""
+        resp = await client.get("/")
+        text = await resp.text()
+        assert 'name="apple-mobile-web-app-capable"' in text
+        assert 'content="yes"' in text
+        assert "apple-mobile-web-app-status-bar-style" in text
+
 
 class TestWebServerTrackTask:
     """Tests for task tracking."""
