@@ -109,7 +109,6 @@ async def _run_compact(
     claude_config: ClaudeConfig,
     prefix: str,
     compact_prompt: Optional[str] = None,
-    browser_enabled: bool = False,
 ) -> Optional[str]:
     """Run /compact command on a session to reduce context size.
 
@@ -143,9 +142,6 @@ async def _run_compact(
 
     if claude_config.yolo:
         cmd.append("--dangerously-skip-permissions")
-
-    if browser_enabled:
-        cmd.append("--chrome")
 
     cwd = Path(working_dir).expanduser()
 
@@ -212,7 +208,6 @@ async def run_maintenance(
     trello_client: Optional[TrelloClient] = None,
     icebox_list_id: Optional[str] = None,
     compact_prompt: Optional[str] = None,
-    browser_enabled: bool = False,
 ) -> MaintenanceResult:
     """Run the maintenance skill for a project.
 
@@ -253,7 +248,6 @@ async def run_maintenance(
             claude_config=claude_config,
             prefix=prefix,
             compact_prompt=compact_prompt,
-            browser_enabled=browser_enabled,
         )
         if compacted_session_id:
             current_session_id = compacted_session_id
@@ -282,9 +276,6 @@ async def run_maintenance(
 
     if claude_config.yolo:
         cmd.append("--dangerously-skip-permissions")
-
-    if browser_enabled:
-        cmd.append("--chrome")
 
     if current_session_id:
         cmd.extend(["--resume", current_session_id])

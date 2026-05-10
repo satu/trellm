@@ -33,14 +33,6 @@ claude:
   # maintenance:
   #   enabled: true
   #   interval: 10  # Run maintenance every N tickets
-  # Global Claude-in-Chrome settings (applies to all projects unless overridden).
-  # When enabled, every `claude` spawn gets the `--chrome` flag so Claude attaches
-  # to the headed Chrome via the claude-in-chrome extension. Requires the browser
-  # stack to be running (see scripts/start-browser.sh) and the extension installed
-  # in ~/.chrome-trellm. Off by default to avoid breaking spawns when the
-  # extension isn't set up.
-  # browser:
-  #   enabled: true
   # Per-project configuration
   projects:
     # Project name matches first word of card name
@@ -57,10 +49,6 @@ claude:
       # maintenance:
       #   enabled: true
       #   interval: 10
-      # Optional: per-project browser override (overrides global setting).
-      # Use to phase --chrome in/out one project at a time.
-      # browser:
-      #   enabled: true
 
 state:
   # Where to store session IDs and processed card tracking

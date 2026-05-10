@@ -33,15 +33,6 @@ class MaintenanceConfig:
 
 
 @dataclass
-class BrowserConfig:
-    """Controls whether the Claude CLI's `--chrome` flag is passed on each
-    spawn (so Claude attaches to the headed Chrome via the claude-in-chrome
-    extension). Off by default — opt in once the extension is installed."""
-
-    enabled: bool = False
-
-
-@dataclass
 class ProjectConfig:
     """Per-project configuration."""
 
@@ -50,8 +41,6 @@ class ProjectConfig:
     compact_prompt: Optional[str] = None  # Custom instructions for /compact
     maintenance: Optional[MaintenanceConfig] = None
     aliases: list[str] = field(default_factory=list)  # Short names that map to this project
-    # Per-project override of the global browser setting. None = inherit global.
-    browser: Optional[BrowserConfig] = None
 
 
 @dataclass
@@ -64,8 +53,6 @@ class ClaudeConfig:
     projects: dict[str, ProjectConfig] = field(default_factory=dict)
     # Global maintenance settings (applies to all projects unless overridden)
     maintenance: Optional[MaintenanceConfig] = None
-    # Global Claude-in-Chrome setting (applies to all projects unless overridden)
-    browser: Optional[BrowserConfig] = None
 
 
 @dataclass
@@ -139,29 +126,6 @@ class Config:
         # Fall back to global config
         return self.claude.maintenance
 
-    def is_browser_enabled(self, project: str) -> bool:
-        """Whether the Claude CLI's `--chrome` flag should be passed for
-        this project. Per-project setting overrides the global setting;
-        absence at both levels means False."""
-        proj = self.claude.projects.get(project)
-        if proj is not None and proj.browser is not None:
-            return proj.browser.enabled
-        if self.claude.browser is not None:
-            return self.claude.browser.enabled
-        return False
-
-    def is_browser_required_anywhere(self) -> bool:
-        """True iff at least one spawn under this config would carry the
-        --chrome flag — i.e. global is enabled, or any per-project
-        override is enabled. Used by start-trellm.sh at boot to decide
-        whether to launch the headed Chrome stack."""
-        if self.claude.browser is not None and self.claude.browser.enabled:
-            return True
-        for proj in self.claude.projects.values():
-            if proj.browser is not None and proj.browser.enabled:
-                return True
-        return False
-
 
 def load_config(config_path: Optional[str] = None) -> Config:
     """Load configuration from file and environment variables.
@@ -215,21 +179,12 @@ def load_config(config_path: Optional[str] = None) -> Config:
                 interval=maint_data.get("interval", 10),
             )
 
-        # Parse per-project browser override if present
-        proj_browser_data = proj_data.get("browser")
-        proj_browser = None
-        if proj_browser_data is not None:
-            proj_browser = BrowserConfig(
-                enabled=proj_browser_data.get("enabled", False),
-            )
-
         projects[name] = ProjectConfig(
             working_dir=proj_data.get("working_dir", ""),
             session_id=proj_data.get("session_id"),
             compact_prompt=proj_data.get("compact_prompt"),
             maintenance=maintenance,
             aliases=proj_data.get("aliases", []),
-            browser=proj_browser,
         )
 
     # Parse global maintenance config if present
@@ -241,14 +196,6 @@ def load_config(config_path: Optional[str] = None) -> Config:
             interval=global_maint_data.get("interval", 10),
         )
 
-    # Parse global browser config if present
-    global_browser_data = claude_data.get("browser")
-    global_browser = None
-    if global_browser_data is not None:
-        global_browser = BrowserConfig(
-            enabled=global_browser_data.get("enabled", False),
-        )
-
     # Build Claude config
     claude = ClaudeConfig(
         binary=claude_data.get("binary", "claude"),
@@ -256,7 +203,6 @@ def load_config(config_path: Optional[str] = None) -> Config:
         yolo=claude_data.get("yolo", False),
         projects=projects,
         maintenance=global_maintenance,
-        browser=global_browser,
     )
 
     # Build web config

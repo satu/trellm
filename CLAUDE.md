@@ -102,13 +102,6 @@ Don't cache 429 errors — allow retry on next request. Use Claude Code's `User-
 - Ticket counts are tracked per-project for maintenance scheduling
 - Unique ticket IDs prevent double-counting when cards are moved back to TODO
 
-### Browser stack (Claude-in-Chrome integration)
-Opt-in via `claude.browser.enabled: true` (or per-project override). When set:
-- `start-trellm.sh` brings up the host-level Chrome stack (`scripts/start-browser.sh start`) before launching the polling loop. Idempotent — safe to re-run.
-- Every `claude` subprocess spawn — `_run_once`, `_run_compact`, `_run_cost`, plus the maintenance pair — gets the `--chrome` flag, so the binary attaches to the headed Chrome via the `claude-in-chrome` Web-Store extension installed in `~/.chrome-trellm`.
-- The polling loop does **not** monitor or auto-restart Chrome on crash. If Chrome dies mid-flight, restart it manually with `bash scripts/start-browser.sh restart`. Browsing cards will fail until the stack is back up; non-browsing cards continue to process unaffected.
-- The browser stack uses display `:99`, ports `9222` (CDP), `5900` (VNC), `6080` (noVNC). Profile dir `~/.chrome-trellm`. The `start-browser.sh` script symlinks the profile's extension dir into `~/.config/google-chrome/Default/Extensions/` on every start so the Claude CLI's `--chrome` flag detects the extension — don't drop that symlink step if you refactor the script.
-
 ## Gotchas
 
 1. **Session IDs change after `/compact`** - The compaction command creates a new session with a new ID. Always capture the new session ID from the JSON output and update state.

@@ -29,20 +29,6 @@ if [ ! -x "$VENV_DIR/bin/trellm" ]; then
     exit 1
 fi
 
-# If the YAML config enables browsing for the global block or any project,
-# bring up the headed Chrome stack (Xvfb + Chrome + x11vnc + noVNC) before
-# the polling loop starts spawning `claude --chrome`. The stack runs as
-# host-level processes — see scripts/start-browser.sh for the lifecycle.
-# Soft-fail: a browser-stack failure must not block trellm startup, since
-# non-browsing cards should still process. Stack restart on Chrome crash
-# is NOT yet handled — operator-driven via `bash scripts/start-browser.sh
-# restart`.
-if "$VENV_DIR/bin/python" -c "import sys; from trellm.config import load_config; sys.exit(0 if load_config().is_browser_required_anywhere() else 1)" 2>/dev/null; then
-    echo "Browser config enabled — starting Chrome stack..."
-    bash "$SCRIPT_DIR/scripts/start-browser.sh" start \
-        || echo "Warning: browser stack failed to start, continuing anyway. Browsing cards will fail until you fix it."
-fi
-
 run_trellm() {
     exec "$VENV_DIR/bin/trellm" -v 2>&1
 }
