@@ -150,6 +150,18 @@ class Config:
             return self.claude.browser.enabled
         return False
 
+    def is_browser_required_anywhere(self) -> bool:
+        """True iff at least one spawn under this config would carry the
+        --chrome flag — i.e. global is enabled, or any per-project
+        override is enabled. Used by start-trellm.sh at boot to decide
+        whether to launch the headed Chrome stack."""
+        if self.claude.browser is not None and self.claude.browser.enabled:
+            return True
+        for proj in self.claude.projects.values():
+            if proj.browser is not None and proj.browser.enabled:
+                return True
+        return False
+
 
 def load_config(config_path: Optional[str] = None) -> Config:
     """Load configuration from file and environment variables.

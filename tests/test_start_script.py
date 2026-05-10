@@ -57,3 +57,50 @@ class TestStartScript:
         content = START_SCRIPT.read_text()
         assert "bin/trellm" in content
         assert "not found" in content
+
+
+class TestStartScriptBrowserLifecycle:
+    """M4 — start-trellm.sh should bring up the headed Chrome stack
+    automatically when the YAML config has any browser flag enabled.
+
+    Why: trellm runs as a host service; if it spawns `claude --chrome`
+    against a non-running Chrome the binary errors out. Auto-starting
+    keeps the operator from having to remember a manual step.
+
+    How: the script gates on `Config.is_browser_required_anywhere()`
+    via the venv's Python (the venv is already set up by this point in
+    the script's flow), and calls `scripts/start-browser.sh start`
+    before launching the polling loop. Idempotent — re-running the
+    script is safe."""
+
+    def test_script_invokes_start_browser_conditionally(self):
+        content = START_SCRIPT.read_text()
+        assert "scripts/start-browser.sh" in content
+
+    def test_script_uses_is_browser_required_anywhere_helper(self):
+        """The gate must go through the public Config accessor — not
+        direct dataclass introspection — so the resolution rules stay
+        in one place."""
+        content = START_SCRIPT.read_text()
+        assert "is_browser_required_anywhere" in content
+
+    def test_script_starts_browser_before_running_trellm(self):
+        """Order matters: stack must be up before the polling loop spawns
+        any `claude --chrome` subprocess."""
+        content = START_SCRIPT.read_text()
+        browser_idx = content.find("scripts/start-browser.sh")
+        run_idx = content.find("run_trellm")
+        assert browser_idx >= 0 and run_idx >= 0
+        assert browser_idx < run_idx, (
+            "browser stack invocation must appear before the trellm run "
+            "function definition/call site is reached"
+        )
+
+    def test_script_failsoft_if_browser_stack_fails(self):
+        """A browser-stack failure should not abort trellm startup —
+        cards that don't browse should still get processed. Document
+        the soft-fail by either trapping the error or using `||`."""
+        content = START_SCRIPT.read_text()
+        # Either explicit `|| ` after the start-browser invocation, or a
+        # documented soft-fail message in the gating block.
+        assert "|| " in content or "Warning" in content or "warn" in content.lower()

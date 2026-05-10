@@ -718,6 +718,71 @@ class TestIsBrowserEnabled:
         assert config.is_browser_enabled("unknown") is False
 
 
+class TestIsBrowserRequiredAnywhere:
+    """Tests for Config.is_browser_required_anywhere().
+
+    Used by start-trellm.sh at boot to decide whether to launch the
+    browser stack. Returns True if the global toggle is on OR any
+    per-project override is on (so per-project-only enablement still
+    triggers the stack on cold start)."""
+
+    def _make_config(self, *, global_browser=None, project_browsers=None):
+        projects = {}
+        for name, browser in (project_browsers or {}).items():
+            projects[name] = ProjectConfig(
+                working_dir=f"~/src/{name}",
+                browser=browser,
+            )
+        return Config(
+            trello=TrelloConfig(
+                api_key="", api_token="", board_id="", todo_list_id="",
+            ),
+            claude=ClaudeConfig(
+                projects=projects,
+                browser=global_browser,
+            ),
+        )
+
+    def test_returns_false_when_no_browser_config_anywhere(self):
+        config = self._make_config(project_browsers={"p1": None})
+        assert config.is_browser_required_anywhere() is False
+
+    def test_returns_true_when_global_enabled(self):
+        config = self._make_config(global_browser=BrowserConfig(enabled=True))
+        assert config.is_browser_required_anywhere() is True
+
+    def test_returns_false_when_global_explicitly_disabled(self):
+        config = self._make_config(global_browser=BrowserConfig(enabled=False))
+        assert config.is_browser_required_anywhere() is False
+
+    def test_returns_true_when_per_project_enabled_global_missing(self):
+        """Operator opted one project in without flipping a global switch."""
+        config = self._make_config(
+            global_browser=None,
+            project_browsers={"p1": BrowserConfig(enabled=True)},
+        )
+        assert config.is_browser_required_anywhere() is True
+
+    def test_returns_true_when_per_project_enabled_global_disabled(self):
+        config = self._make_config(
+            global_browser=BrowserConfig(enabled=False),
+            project_browsers={"p1": BrowserConfig(enabled=True)},
+        )
+        assert config.is_browser_required_anywhere() is True
+
+    def test_returns_true_when_global_enabled_with_some_disabled_overrides(self):
+        """Even if every existing project opts out, global=true means we
+        still start the stack — a future project could inherit global."""
+        config = self._make_config(
+            global_browser=BrowserConfig(enabled=True),
+            project_browsers={
+                "p1": BrowserConfig(enabled=False),
+                "p2": BrowserConfig(enabled=False),
+            },
+        )
+        assert config.is_browser_required_anywhere() is True
+
+
 class TestProcessingCardsTracking:
     """Tests for _processing_cards set that tracks in-flight cards."""
 
