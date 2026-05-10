@@ -7,7 +7,14 @@ from pathlib import Path
 import pytest
 import yaml
 
-from trellm.config import Config, load_config, ProjectConfig, TrelloConfig, ClaudeConfig
+from trellm.config import (
+    BrowserConfig,
+    Config,
+    load_config,
+    ProjectConfig,
+    TrelloConfig,
+    ClaudeConfig,
+)
 from trellm.__main__ import (
     compare_configs,
     configs_equal,
@@ -561,6 +568,154 @@ class TestParseProject:
     def test_parse_project_colon_only(self):
         """Test that trailing colon is stripped."""
         assert parse_project("trellm:") == "trellm"
+
+
+class TestBrowserConfig:
+    """Tests for the BrowserConfig dataclass and the global / per-project
+    `browser` block (M3 of the Chrome-extension integration).
+
+    Why this exists: trellm needs an opt-in switch for the Claude CLI's
+    `--chrome` flag (passing it without an installed extension would break
+    every spawn). We support a global default plus a per-project override
+    so we can phase the flag in one project at a time.
+
+    How to apply: `Config.is_browser_enabled(project)` is the single
+    accessor — call sites should never reach into the dataclasses directly.
+    """
+
+    def test_browser_config_defaults_disabled(self):
+        """A bare BrowserConfig() must default to enabled=False so adding
+        the field doesn't accidentally turn the flag on for existing setups."""
+        assert BrowserConfig().enabled is False
+
+    def test_global_browser_config_loaded_from_yaml(self, tmp_path):
+        config_data = {
+            "trello": {
+                "api_key": "k", "api_token": "t",
+                "board_id": "b", "todo_list_id": "l",
+            },
+            "claude": {
+                "browser": {"enabled": True},
+                "projects": {"p1": {"working_dir": "~/src/p1"}},
+            },
+        }
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml.dump(config_data))
+
+        config = load_config(str(config_file))
+        assert config.claude.browser is not None
+        assert config.claude.browser.enabled is True
+
+    def test_project_browser_config_loaded_from_yaml(self, tmp_path):
+        config_data = {
+            "trello": {
+                "api_key": "k", "api_token": "t",
+                "board_id": "b", "todo_list_id": "l",
+            },
+            "claude": {
+                "projects": {
+                    "p1": {
+                        "working_dir": "~/src/p1",
+                        "browser": {"enabled": True},
+                    }
+                },
+            },
+        }
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml.dump(config_data))
+
+        config = load_config(str(config_file))
+        proj = config.claude.projects["p1"]
+        assert proj.browser is not None
+        assert proj.browser.enabled is True
+
+    def test_missing_browser_block_yields_none(self, tmp_path):
+        """No browser: block in yaml leaves the field as None at both
+        levels — distinguishes 'not set' from 'set to false'."""
+        config_data = {
+            "trello": {
+                "api_key": "k", "api_token": "t",
+                "board_id": "b", "todo_list_id": "l",
+            },
+            "claude": {
+                "projects": {"p1": {"working_dir": "~/src/p1"}},
+            },
+        }
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml.dump(config_data))
+
+        config = load_config(str(config_file))
+        assert config.claude.browser is None
+        assert config.claude.projects["p1"].browser is None
+
+
+class TestIsBrowserEnabled:
+    """Tests for Config.is_browser_enabled(project).
+
+    Resolution order: per-project override > global > False. Mirrors the
+    pattern of get_maintenance_config but returns a plain bool because
+    callers only need the on/off bit.
+    """
+
+    def _make_config(self, *, global_browser=None, project_browsers=None):
+        projects = {}
+        for name, browser in (project_browsers or {}).items():
+            projects[name] = ProjectConfig(
+                working_dir=f"~/src/{name}",
+                browser=browser,
+            )
+        return Config(
+            trello=TrelloConfig(
+                api_key="", api_token="", board_id="", todo_list_id="",
+            ),
+            claude=ClaudeConfig(
+                projects=projects,
+                browser=global_browser,
+            ),
+        )
+
+    def test_default_returns_false(self):
+        """No browser config anywhere → False (regression safety)."""
+        config = self._make_config(project_browsers={"p1": None})
+        assert config.is_browser_enabled("p1") is False
+
+    def test_global_enabled_propagates_to_project(self):
+        config = self._make_config(
+            global_browser=BrowserConfig(enabled=True),
+            project_browsers={"p1": None},
+        )
+        assert config.is_browser_enabled("p1") is True
+
+    def test_project_enabled_overrides_global_disabled(self):
+        config = self._make_config(
+            global_browser=BrowserConfig(enabled=False),
+            project_browsers={"p1": BrowserConfig(enabled=True)},
+        )
+        assert config.is_browser_enabled("p1") is True
+
+    def test_project_disabled_overrides_global_enabled(self):
+        """Lets us blacklist one project from a global rollout."""
+        config = self._make_config(
+            global_browser=BrowserConfig(enabled=True),
+            project_browsers={"p1": BrowserConfig(enabled=False)},
+        )
+        assert config.is_browser_enabled("p1") is False
+
+    def test_unknown_project_falls_back_to_global(self):
+        """If the project isn't in config (e.g. card with unknown prefix),
+        the global setting still applies."""
+        config = self._make_config(
+            global_browser=BrowserConfig(enabled=True),
+            project_browsers={},
+        )
+        assert config.is_browser_enabled("unknown") is True
+
+    def test_unknown_project_with_no_global_returns_false(self):
+        config = self._make_config(
+            global_browser=None,
+            project_browsers={},
+        )
+        assert config.is_browser_enabled("unknown") is False
 
 
 class TestProcessingCardsTracking:

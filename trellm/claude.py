@@ -578,6 +578,7 @@ class ClaudeRunner:
         working_dir: Optional[str],
         prefix: str,
         compact_prompt: Optional[str] = None,
+        browser_enabled: bool = False,
     ) -> Optional[str]:
         """Run /compact command on a session to reduce context size.
 
@@ -622,6 +623,9 @@ class ClaudeRunner:
 
         if self.yolo:
             cmd.append("--dangerously-skip-permissions")
+
+        if browser_enabled:
+            cmd.append("--chrome")
 
         cwd = Path(working_dir).expanduser() if working_dir else None
 
@@ -729,6 +733,7 @@ class ClaudeRunner:
         session_id: str,
         working_dir: Optional[str],
         prefix: str,
+        browser_enabled: bool = False,
     ) -> Optional[CostInfo]:
         """Run /cost command on a session to get usage statistics.
 
@@ -752,6 +757,9 @@ class ClaudeRunner:
 
         if self.yolo:
             cmd.append("--dangerously-skip-permissions")
+
+        if browser_enabled:
+            cmd.append("--chrome")
 
         cwd = Path(working_dir).expanduser() if working_dir else None
 
@@ -824,6 +832,7 @@ class ClaudeRunner:
         last_card_id: Optional[str] = None,
         compact_prompt: Optional[str] = None,
         output_callback: Optional[callable] = None,
+        browser_enabled: bool = False,
     ) -> ClaudeResult:
         """Run Claude Code as a subprocess with the given task.
 
@@ -865,6 +874,7 @@ class ClaudeRunner:
                 working_dir=working_dir,
                 prefix=prefix,
                 compact_prompt=compact_prompt,
+                browser_enabled=browser_enabled,
             )
             if new_session_id:
                 current_session_id = new_session_id
@@ -885,6 +895,7 @@ class ClaudeRunner:
                     working_dir=working_dir,
                     prefix=prefix,
                     output_callback=output_callback,
+                    browser_enabled=browser_enabled,
                 )
 
                 # Get cost info after successful execution
@@ -893,6 +904,7 @@ class ClaudeRunner:
                         session_id=result.session_id,
                         working_dir=working_dir,
                         prefix=prefix,
+                        browser_enabled=browser_enabled,
                     )
                     result.cost_info = cost_info
                     if cost_info:
@@ -946,6 +958,7 @@ class ClaudeRunner:
                     working_dir=working_dir,
                     prefix=prefix,
                     compact_prompt=compact_prompt,
+                    browser_enabled=browser_enabled,
                 )
 
                 if new_session_id:
@@ -1009,6 +1022,7 @@ class ClaudeRunner:
         working_dir: Optional[str],
         prefix: str,
         output_callback: Optional[callable] = None,
+        browser_enabled: bool = False,
     ) -> ClaudeResult:
         """Run Claude Code once without retry logic.
 
@@ -1047,6 +1061,9 @@ class ClaudeRunner:
 
         if self.yolo:
             cmd.append("--dangerously-skip-permissions")
+
+        if browser_enabled:
+            cmd.append("--chrome")
 
         if session_id:
             cmd.extend(["--resume", session_id])

@@ -2282,3 +2282,162 @@ class TestFetchClaudeUsageLimits:
         assert "expired" in result.error or "invalid" in result.error
         # Should include guidance on how to fix
         assert "claude" in result.error.lower()
+
+
+class TestChromeFlagPlumbing:
+    """M3 — verify the Claude CLI's `--chrome` flag is propagated through
+    the three subprocess paths (`_run_once`, `_run_compact`, `_run_cost`)
+    when browser_enabled=True and omitted otherwise.
+
+    Why this matters: passing `--chrome` to a binary without the
+    claude-in-chrome extension installed would break every spawn, so
+    behaviour must default to off and only flip per explicit config.
+    """
+
+    @pytest.fixture
+    def runner(self):
+        config = ClaudeConfig(binary="claude", timeout=60, yolo=False, projects={})
+        return ClaudeRunner(config)
+
+    @pytest.fixture
+    def mock_card(self):
+        return TrelloCard(
+            id="card123", name="test card", description="d",
+            url="https://trello.com/c/test",
+            last_activity="2026-01-01T00:00:00Z",
+        )
+
+    async def _run_once_capturing_cmd(self, runner, card, *, browser_enabled=False):
+        """Drive _run_once with a fake subprocess that returns immediately
+        and capture the cmd argv. Returns the captured cmd list."""
+        captured: list = []
+
+        async def capture_exec(*args, **kwargs):
+            captured.extend(args)
+            mock_proc = AsyncMock()
+            mock_proc.returncode = 0
+            mock_proc.communicate.return_value = (
+                b'{"type":"result","result":"ok","session_id":"s1"}\n',
+                b"",
+            )
+            return mock_proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=capture_exec):
+            await runner._run_once(
+                card=card, project="test", working_dir="/tmp/test",
+                session_id=None, prefix="[test] ",
+                browser_enabled=browser_enabled,
+            )
+        return captured
+
+    @pytest.mark.asyncio
+    async def test_run_once_omits_chrome_flag_by_default(self, runner, mock_card):
+        cmd = await self._run_once_capturing_cmd(runner, mock_card)
+        assert "--chrome" not in cmd
+
+    @pytest.mark.asyncio
+    async def test_run_once_appends_chrome_flag_when_enabled(self, runner, mock_card):
+        cmd = await self._run_once_capturing_cmd(
+            runner, mock_card, browser_enabled=True,
+        )
+        assert "--chrome" in cmd
+
+    async def _run_compact_capturing_cmd(self, runner, *, browser_enabled=False):
+        captured: list = []
+
+        async def capture_exec(*args, **kwargs):
+            captured.extend(args)
+            mock_proc = AsyncMock()
+            mock_proc.returncode = 0
+            mock_proc.communicate.return_value = (
+                b'{"type":"result","session_id":"s2","result":"ok"}\n',
+                b"",
+            )
+            return mock_proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=capture_exec):
+            await runner._run_compact(
+                session_id="s1",
+                working_dir="/tmp/test",
+                prefix="[test] ",
+                browser_enabled=browser_enabled,
+            )
+        return captured
+
+    @pytest.mark.asyncio
+    async def test_run_compact_omits_chrome_flag_by_default(self, runner):
+        cmd = await self._run_compact_capturing_cmd(runner)
+        assert "--chrome" not in cmd
+
+    @pytest.mark.asyncio
+    async def test_run_compact_appends_chrome_flag_when_enabled(self, runner):
+        # /compact and /cost match humphrey's behaviour: pass --chrome on
+        # every spawn when enabled, so the extension's session-state stays
+        # warm rather than re-attaching from scratch each meta-operation.
+        cmd = await self._run_compact_capturing_cmd(runner, browser_enabled=True)
+        assert "--chrome" in cmd
+
+    async def _run_cost_capturing_cmd(self, runner, *, browser_enabled=False):
+        captured: list = []
+
+        async def capture_exec(*args, **kwargs):
+            captured.extend(args)
+            mock_proc = AsyncMock()
+            mock_proc.returncode = 0
+            mock_proc.communicate.return_value = (
+                b'{"type":"result","total_cost_usd":0.01,"duration_ms":100,"duration_api_ms":50}\n',
+                b"",
+            )
+            return mock_proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=capture_exec):
+            await runner._run_cost(
+                session_id="s1",
+                working_dir="/tmp/test",
+                prefix="[test] ",
+                browser_enabled=browser_enabled,
+            )
+        return captured
+
+    @pytest.mark.asyncio
+    async def test_run_cost_omits_chrome_flag_by_default(self, runner):
+        cmd = await self._run_cost_capturing_cmd(runner)
+        assert "--chrome" not in cmd
+
+    @pytest.mark.asyncio
+    async def test_run_cost_appends_chrome_flag_when_enabled(self, runner):
+        cmd = await self._run_cost_capturing_cmd(runner, browser_enabled=True)
+        assert "--chrome" in cmd
+
+    @pytest.mark.asyncio
+    async def test_run_propagates_browser_flag_through_pipeline(
+        self, runner, mock_card,
+    ):
+        """End-to-end: top-level run() with browser_enabled=True must pass
+        the flag down to the pre-compact + run_once + cost call chain."""
+        captured_cmds: list[list] = []
+
+        async def capture_exec(*args, **kwargs):
+            captured_cmds.append(list(args))
+            mock_proc = AsyncMock()
+            mock_proc.returncode = 0
+            mock_proc.communicate.return_value = (
+                b'{"type":"result","session_id":"s2","result":"ok","total_cost_usd":0.01,"duration_ms":100,"duration_api_ms":50}\n',
+                b"",
+            )
+            return mock_proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=capture_exec):
+            await runner.run(
+                card=mock_card,
+                project="test",
+                session_id="prior-session",
+                working_dir="/tmp/test",
+                last_card_id="some-other-card",  # forces pre-compact
+                browser_enabled=True,
+            )
+
+        # Every spawn (pre-compact, _run_once, _run_cost) should carry --chrome
+        assert len(captured_cmds) >= 2  # at minimum pre-compact + run_once
+        for cmd in captured_cmds:
+            assert "--chrome" in cmd, f"expected --chrome in {cmd}"

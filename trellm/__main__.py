@@ -433,6 +433,7 @@ async def handle_maintenance_command(
             trello_client=trello,
             icebox_list_id=config.trello.icebox_list_id,
             compact_prompt=config.get_compact_prompt(project),
+            browser_enabled=config.is_browser_enabled(project),
         )
 
         if result.success:
@@ -803,6 +804,7 @@ async def process_cards(
                     trello_client=trello,
                     icebox_list_id=config.trello.icebox_list_id,
                     compact_prompt=config.get_compact_prompt(project),
+                    browser_enabled=config.is_browser_enabled(project),
                 )
                 if maint_result.success:
                     state.set_last_maintenance(project)
@@ -837,6 +839,7 @@ async def process_cards(
                 last_card_id=last_card_id,
                 compact_prompt=config.get_compact_prompt(project),
                 output_callback=output_cb,
+                browser_enabled=config.is_browser_enabled(project),
             )
 
             # Update session ID and last card ID for next task
@@ -930,6 +933,7 @@ async def process_card_for_project(
                     trello_client=trello,
                     icebox_list_id=config.trello.icebox_list_id,
                     compact_prompt=config.get_compact_prompt(project),
+                    browser_enabled=config.is_browser_enabled(project),
                 )
                 if maint_result.success:
                     state.set_last_maintenance(project)
@@ -965,6 +969,7 @@ async def process_card_for_project(
                 last_card_id=last_card_id,
                 compact_prompt=config.get_compact_prompt(project),
                 output_callback=output_cb,
+                browser_enabled=config.is_browser_enabled(project),
             )
 
             # Update session ID and last card ID for next task
