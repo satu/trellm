@@ -202,52 +202,301 @@ and the upstream Patchright SDK is actively maintained
 (`patchright@^1.52.1` in `package.json`). Monitor upstream for breakage
 on Chrome auto-updates; if Patchright stops keeping up, revisit.
 
-## 6. Smoke test
+## 6. Milestone breakdown
 
-Mirror the M5 milestone from the (now-archived) claude-in-chrome
-re-attempt card.
+Each milestone is a separate follow-up ticket, sequenced strictly. Each
+milestone has a hard stop gate — if its verification fails, the next
+milestone does not begin until the failure is understood and the plan
+is corrected.
 
-**File a follow-up card** with:
+A general rule across all milestones: **one milestone = one ticket =
+one commit (or a tight sequence on a focused branch)**. Don't bundle
+scope across milestones. If you discover work that belongs to a later
+milestone while in an earlier one, write it down and defer.
 
-> *trellm patchright-mcp M-smoke fetch example.com title via patchright
-> from a trellm-spawned Claude*
->
-> ## Pre-req
-> - `scripts/start-browser.sh` resurrected (sans extension symlink) and
->   `--chrome-trellm` profile in place.
-> - `claude.projects.trellm.browser.enabled: true` in `~/.trellm/config.yaml`.
-> - patchright-mcp-lite built (`npm install && npm run build` in
->   `~/src/patchright-mcp-lite`) and CDP-reachable on `localhost:9222`.
->
-> ## Card body
-> Browse to `https://example.com` using the patchright MCP, return the
-> page title.
->
-> ## Pass criteria
-> - The Claude subprocess is invoked with `--mcp-config` referencing
->   patchright (verify in the live-output stream that the MCP is
->   listed).
-> - Claude calls `mcp__patchright__browse` (verify in the stream).
-> - The card comment contains the literal string `Example Domain`.
-> - No claude-in-chrome bridge errors in the stream (we never go near
->   the bridge).
->
-> ## Stop gate
-> If any of the pre-reqs is wrong or the smoke test fails, **stop and
-> re-investigate** — do not promote browser-enabled to other projects.
+### M1 — Browser stack (host-side Chrome + Xvfb + VNC)
 
-This card slots into READY TO TRY immediately after the wiring card it
-depends on. Suggested split:
+> *trellm patchright-mcp M1 resurrect browser-stack scripts (sans
+> claude-in-chrome extension)*
 
-1. **M1 — browser stack**: resurrect `scripts/start-browser.sh` /
-   `setup-browser.sh` minus the extension symlink; add static tests.
-2. **M2 — MCP wiring**: add `BrowserConfig` + `Config.is_browser_enabled`
-   + `--mcp-config` plumbing in `ClaudeRunner.run` /
-   `_run_compact` / `_run_cost` / `maintenance.run`, with unit tests.
-3. **M3 — auto-start**: have `start-trellm.sh` invoke
-   `scripts/start-browser.sh start` when `claude.browser.enabled` (global
-   or any project) is true.
-4. **M4 — smoke test card** (the one above).
+**Scope.** Files that may change:
+
+- `scripts/start-browser.sh` (resurrected from
+  [484e6c3](https://github.com/satu/trellm/commit/484e6c3))
+- `scripts/setup-browser.sh` (resurrected from the same commit)
+- `tests/test_browser_scripts.py` (new, or a shell-level smoke check;
+  see Verification below)
+
+Nothing in `trellm/` changes in M1. No Python code. No `--mcp-config`
+plumbing yet. **Do not** install or symlink any browser extension —
+the whole reason patchright-mcp exists is to avoid that path.
+
+**Implementation steps.**
+
+1. `git show 484e6c3:scripts/start-browser.sh > scripts/start-browser.sh`,
+   `git show 484e6c3:scripts/setup-browser.sh > scripts/setup-browser.sh`,
+   `chmod +x` both.
+2. Delete the `EXTENSION_ID` constant and the
+   `~/.config/google-chrome/Default/Extensions/$EXTENSION_ID` symlink
+   block from `start-browser.sh`.
+3. Delete any extension-install bits from `setup-browser.sh`.
+4. Verify whether `--no-sandbox` is still needed. We run as
+   `dariofreni`, not root, so it likely isn't — drop it and let
+   Verification step 4 confirm. If Chrome refuses to start, restore the
+   flag and document why in a one-line comment.
+5. Add a tiny test that asserts the scripts are syntactically valid
+   (`bash -n`) and that `start-browser.sh` defines the expected
+   functions/commands (`start`, `stop`, `status`). This catches
+   regressions if the script is edited later.
+
+**Verification steps.**
+
+1. `bash -n scripts/start-browser.sh && bash -n scripts/setup-browser.sh`
+   exits 0 (syntax).
+2. The test from step 5 above passes under `pytest`.
+3. `scripts/setup-browser.sh` runs on a fresh shell without errors
+   (idempotent: running it twice in a row works).
+4. `scripts/start-browser.sh start` returns 0 and Chrome binds CDP on
+   9222: `curl -s http://localhost:9222/json/version` returns JSON with
+   a `Browser` field.
+5. `scripts/start-browser.sh status` reports a running PID.
+6. `scripts/start-browser.sh stop` releases 9222: `curl
+   http://localhost:9222/json/version` fails with connection refused.
+7. Idempotency: `start ; start` second invocation says "already
+   running" and exits 0 (does not double-launch Chrome).
+8. Profile dir `~/.chrome-trellm/Default/` exists after first start; a
+   manually-written cookie in `Default/Cookies` survives `stop` →
+   `start`.
+9. VNC reachable: `curl -s -o /dev/null -w "%{http_code}"
+   http://localhost:6080/vnc.html` returns `200`.
+10. **Negative check**: no `claude-in-chrome` extension anywhere under
+    `~/.config/google-chrome/Default/Extensions/` (`ls` shows nothing
+    matching `fcoeoabgfenejglbffodgkkbkcdhcgfn`).
+
+**Stop gate.** Any verification step above fails → fix in M1, do not
+start M2. If steps 4–7 fail in a way that suggests Chrome-version drift
+(profile incompatibility, Xvfb quirks, etc.), capture the symptom in a
+card comment before retrying.
+
+**Out of scope for M1.** Any change to `trellm/` Python. Any
+`--mcp-config` work. `start-trellm.sh` auto-start (that's M3).
+patchright-mcp-lite build/install (assume it's already built; if not,
+note as a one-line pre-req in the card, not a step).
+
+---
+
+### M2 — MCP wiring (`--mcp-config` plumbed through `ClaudeRunner`)
+
+> *trellm patchright-mcp M2 add BrowserConfig + Config.is_browser_enabled
+> + --mcp-config plumbing*
+
+**Scope.** Files that may change:
+
+- `trellm/config.py` (add `BrowserConfig` dataclass, the
+  `is_browser_enabled` accessor, and the JSON-config helper)
+- `trellm/claude.py` (add `browser_enabled` param to `run`,
+  `_run_once`, `_run_compact`, `_run_cost`; append `--mcp-config`
+  when true)
+- `trellm/maintenance.py` (thread the same flag for the maintenance
+  invocation)
+- `trellm/__main__.py` and `trellm/web/server.py` (compute
+  `browser_enabled = config.is_browser_enabled(project)` at call sites
+  and pass it down)
+- `tests/test_config.py`, `tests/test_claude.py`,
+  `tests/test_maintenance.py` (red-then-green coverage for every
+  branch)
+
+Mirrors the reverted
+[c09e9c7](https://github.com/satu/trellm/commit/c09e9c7) — but plumbs
+`--mcp-config <json>` instead of the old `--chrome` flag.
+
+**Implementation steps (in TDD order).**
+
+1. Write failing `test_config.py`: YAML with
+   `claude.projects.foo.browser.enabled: true` →
+   `Config.is_browser_enabled("foo")` returns `True`; YAML without →
+   `False`. Add the `BrowserConfig` dataclass and accessor; tests go
+   green.
+2. Write failing `test_config.py`: `Config.patchright_mcp_config_json()`
+   returns a JSON string parseable by `json.loads`, with
+   `mcpServers.patchright.command == "node"` and the args path
+   resolving under `~/src/patchright-mcp-lite/dist/index.js` (or a
+   configurable override). Implement; tests go green.
+3. Write failing `test_claude.py`: stub `asyncio.create_subprocess_exec`
+   and assert that `ClaudeRunner.run(..., browser_enabled=True)`
+   includes `--mcp-config` in the command; `browser_enabled=False` does
+   not. Implement; tests go green.
+4. Same pattern for `_run_compact` and `_run_cost`.
+5. Same pattern in `test_maintenance.py`: maintenance honours the
+   project's `browser.enabled` flag.
+6. Wire call sites in `__main__.py` and `web/server.py` to compute the
+   flag from `Config.is_browser_enabled(project)` and pass it down.
+   Add an integration-level test that asserts a card processed for a
+   browser-enabled project results in a `--mcp-config`-bearing command
+   (subprocess mocked).
+
+**Verification steps.**
+
+1. `pytest` is fully green. No skipped tests in the new files.
+2. `pytest --cov=trellm tests/test_config.py tests/test_claude.py
+   tests/test_maintenance.py` shows the new branches (`browser_enabled`
+   true/false, JSON helper) are exercised — eyeball coverage on the
+   added lines.
+3. Manual smoke (does not require Chrome running): run `trellm --once`
+   against a project with `browser.enabled: true` on a trivial card
+   while subprocess execution is logged at DEBUG; the logged command
+   contains `--mcp-config`. Same project with `enabled: false` →
+   command does not.
+4. **Negative check**: grep the repo for any leftover `--chrome` flag
+   from the reverted experiment; none should exist. Grep for
+   `claude-in-chrome`, `bridge.claudeusercontent.com`,
+   `fcoeoabgfenejglbffodgkkbkcdhcgfn` — all should return zero hits in
+   `trellm/` and `scripts/`.
+
+**Stop gate.** Any failing test, or `--mcp-config` showing up when
+`browser.enabled` is `false`, or any of the negative greps above
+returning a hit → fix in M2, do not start M3.
+
+**Out of scope for M2.** Starting Chrome (M3). Running the MCP server
+end-to-end (M4). Editing `start-browser.sh` again. Adding browser
+support to projects other than `trellm` (`mbspending` etc. opt in
+later, individually).
+
+---
+
+### M3 — Auto-start the browser stack from `start-trellm.sh`
+
+> *trellm patchright-mcp M3 auto-start browser stack from
+> start-trellm.sh when any project has browser.enabled*
+
+**Scope.** Files that may change:
+
+- `start-trellm.sh` (the Docker entrypoint / direct launcher introduced
+  in [4275aae](https://github.com/satu/trellm/commit/4275aae))
+- A test (shell-level or Python) verifying the auto-start decision
+  logic, isolated from actually starting Chrome.
+
+Nothing in `trellm/` Python.
+
+**Implementation steps.**
+
+1. In `start-trellm.sh`, after the config sanity check, decide whether
+   the browser stack is needed: parse `~/.trellm/config.yaml` and
+   return true iff `claude.browser.enabled: true` globally **or** any
+   `claude.projects.<name>.browser.enabled: true`. Use `yq` if already
+   available, else a Python one-liner via the same venv trellm uses.
+2. If needed, invoke `scripts/start-browser.sh start` (which is
+   idempotent per M1). Fail the script with a clear error if Chrome
+   doesn't come up on 9222 within 10 seconds — do not let trellm run
+   browser-enabled cards against a dead browser.
+3. **Do not** stop the browser on trellm exit. The browser is a
+   long-lived dependency owned by the host (VNC users may still want
+   it; subsequent trellm restarts should not pay the cold-start cost).
+   Document this in a one-line comment.
+4. Add a small test fixture that drives the decision logic with three
+   YAML inputs (no browser, global on, one project on) and asserts the
+   correct branch is taken — without actually invoking
+   `scripts/start-browser.sh`.
+
+**Verification steps.**
+
+1. `bash -n start-trellm.sh` exits 0.
+2. The decision-logic test passes.
+3. With no project having `browser.enabled: true` and no global flag:
+   `start-trellm.sh` runs without launching Chrome. `pgrep -f
+   "remote-debugging-port=9222"` returns empty; trellm still polls
+   normally.
+4. With one project (e.g. `trellm`) flipped on: `start-trellm.sh`
+   starts the browser stack first; `curl -s -o /dev/null -w "%{http_code}"
+   http://localhost:9222/json/version` returns `200` within 10s; trellm
+   starts after.
+5. Idempotent: invoke `start-trellm.sh` a second time while Chrome is
+   already up → no error, Chrome PID is unchanged.
+6. Lifetime: stop trellm (Ctrl-C); Chrome stays alive; VNC still
+   reachable; restart trellm and it reuses the running Chrome.
+7. **Negative check**: a config with `enabled: true` *and* `setup-
+   browser.sh` not yet run → `start-trellm.sh` fails loudly with a
+   pointer to the setup command rather than starting trellm in a
+   half-broken state.
+
+**Stop gate.** Any of the above fails → fix in M3, do not start M4.
+
+**Out of scope for M3.** Stopping Chrome on exit. Cookie management
+(handled by the profile dir from M1). Anything in `trellm/`.
+
+---
+
+### M4 — End-to-end smoke test card
+
+> *trellm patchright-mcp M4 smoke: fetch example.com title via
+> patchright from a trellm-spawned Claude*
+
+**Scope.** No code change in this milestone — it's a Trello card whose
+*processing* is the test. The deliverable is a green run that proves
+M1+M2+M3 are correctly composed.
+
+**Pre-flight checklist (run before filing the card).**
+
+- [ ] M1 verification 1–10 all green within the last week.
+- [ ] M2 `pytest` fully green within the last week.
+- [ ] M3 verification 3–7 all green within the last week.
+- [ ] `claude.projects.trellm.browser.enabled: true` is set in
+      `~/.trellm/config.yaml`.
+- [ ] `npm install && npm run build` succeeded in
+      `~/src/patchright-mcp-lite` and `dist/index.js` exists.
+- [ ] `curl -s http://localhost:9222/json/version` returns 200 with a
+      `Browser` field.
+
+**Card body** (this is the literal body of the M4 follow-up card —
+copy verbatim when filing):
+
+> Browse to `https://example.com` using the patchright MCP and return
+> the page title in a Trello comment on this card.
+
+**Pass criteria.**
+
+1. The Claude subprocess command (visible in the trellm live-output
+   stream and DEBUG logs) contains `--mcp-config` referencing
+   patchright-mcp-lite.
+2. The MCP server initialisation line `patchright-lite` appears in the
+   stream (i.e. claude actually loaded the server).
+3. Claude calls `mcp__patchright__browse` (visible in the stream as a
+   tool call).
+4. The "Claude:" comment posted to the card contains the literal
+   string `Example Domain`.
+5. No mention of `bridge.claudeusercontent.com`,
+   `claude-in-chrome`, or the reverted `--chrome` flag anywhere in the
+   stream.
+
+**Verification steps.**
+
+1. All five pass criteria observed on a single run.
+2. Re-run the card a second time (move it back to TODO); same result.
+   Idempotency proves the long-lived Chrome and the per-subprocess MCP
+   are both working as designed.
+3. Spot-check `~/.chrome-trellm/Default/Cookies` exists and is
+   non-empty after the run (proves the shared profile is in use, not a
+   throwaway one).
+
+**Stop gate.** Any pass criterion fails → **do not promote
+`browser.enabled` to any other project**. File a follow-up
+investigation card with the stream excerpt and the failing criterion.
+
+**Out of scope for M4.** Promoting browser support to `mbspending`,
+`smugcoin`, or any other project — those are their own opt-in cards,
+filed only after M4 is green.
+
+---
+
+### Sequencing summary
+
+```
+M1 (browser stack)  ──►  M2 (MCP wiring)  ──►  M3 (auto-start)  ──►  M4 (smoke)
+   stop gate            stop gate              stop gate             stop gate
+```
+
+Strictly sequential. Each gate must close before the next opens. M0
+(the investigation in this doc) is already complete.
 
 ## Out of scope
 
