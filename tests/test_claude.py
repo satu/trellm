@@ -2282,3 +2282,231 @@ class TestFetchClaudeUsageLimits:
         assert "expired" in result.error or "invalid" in result.error
         # Should include guidance on how to fix
         assert "claude" in result.error.lower()
+
+
+class TestMcpConfigFlagPlumbing:
+    """M2 — verify that `--mcp-config <patchright-json>` is propagated through
+    the three subprocess paths (`_run_once`, `_run_compact`, `_run_cost`) when
+    browser_enabled=True and omitted otherwise.
+
+    Why this matters: passing `--mcp-config` with a path to an unbuilt MCP
+    binary would crash every spawn, so behaviour must default to off and
+    only flip per explicit config. The JSON blob comes from
+    Config.patchright_mcp_config_json().
+    """
+
+    @pytest.fixture
+    def runner(self):
+        config = ClaudeConfig(binary="claude", timeout=60, yolo=False, projects={})
+        return ClaudeRunner(config)
+
+    @pytest.fixture
+    def patchright_json(self):
+        # Minimal but realistic patchright MCP blob. The exact contents are
+        # tested in test_config.py; here we only care that whatever the
+        # caller hands in propagates verbatim.
+        return json.dumps(
+            {"mcpServers": {"patchright": {"command": "node", "args": ["/p/dist/index.js"]}}}
+        )
+
+    @pytest.fixture
+    def mock_card(self):
+        return TrelloCard(
+            id="card123", name="test card", description="d",
+            url="https://trello.com/c/test",
+            last_activity="2026-01-01T00:00:00Z",
+        )
+
+    @staticmethod
+    def _cmd_has_mcp_config(cmd, expected_json):
+        """Assert `--mcp-config <expected_json>` appears in `cmd` as a
+        consecutive pair (claude CLI expects them adjacent)."""
+        cmd_list = list(cmd)
+        for i, token in enumerate(cmd_list):
+            if token == "--mcp-config":
+                return i + 1 < len(cmd_list) and cmd_list[i + 1] == expected_json
+        return False
+
+    async def _run_once_capturing_cmd(self, runner, card, *, browser_enabled=False, mcp_config_json=None):
+        captured: list = []
+
+        async def capture_exec(*args, **kwargs):
+            captured.extend(args)
+            mock_proc = AsyncMock()
+            mock_proc.returncode = 0
+            mock_proc.communicate.return_value = (
+                b'{"type":"result","result":"ok","session_id":"s1"}\n',
+                b"",
+            )
+            return mock_proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=capture_exec):
+            await runner._run_once(
+                card=card, project="test", working_dir="/tmp/test",
+                session_id=None, prefix="[test] ",
+                browser_enabled=browser_enabled,
+                mcp_config_json=mcp_config_json,
+            )
+        return captured
+
+    @pytest.mark.asyncio
+    async def test_run_once_omits_mcp_config_by_default(self, runner, mock_card):
+        cmd = await self._run_once_capturing_cmd(runner, mock_card)
+        assert "--mcp-config" not in cmd
+
+    @pytest.mark.asyncio
+    async def test_run_once_appends_mcp_config_when_enabled(
+        self, runner, mock_card, patchright_json
+    ):
+        cmd = await self._run_once_capturing_cmd(
+            runner, mock_card,
+            browser_enabled=True, mcp_config_json=patchright_json,
+        )
+        assert self._cmd_has_mcp_config(cmd, patchright_json), (
+            f"--mcp-config <patchright_json> missing from {cmd}"
+        )
+
+    async def _run_compact_capturing_cmd(self, runner, *, browser_enabled=False, mcp_config_json=None):
+        captured: list = []
+
+        async def capture_exec(*args, **kwargs):
+            captured.extend(args)
+            mock_proc = AsyncMock()
+            mock_proc.returncode = 0
+            mock_proc.communicate.return_value = (
+                b'{"type":"result","session_id":"s2","result":"ok"}\n',
+                b"",
+            )
+            return mock_proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=capture_exec):
+            await runner._run_compact(
+                session_id="s1",
+                working_dir="/tmp/test",
+                prefix="[test] ",
+                browser_enabled=browser_enabled,
+                mcp_config_json=mcp_config_json,
+            )
+        return captured
+
+    @pytest.mark.asyncio
+    async def test_run_compact_omits_mcp_config_by_default(self, runner):
+        cmd = await self._run_compact_capturing_cmd(runner)
+        assert "--mcp-config" not in cmd
+
+    @pytest.mark.asyncio
+    async def test_run_compact_appends_mcp_config_when_enabled(
+        self, runner, patchright_json
+    ):
+        # /compact spawns must also carry --mcp-config so the patchright
+        # MCP loads in the post-compact session (same pattern as the
+        # reverted --chrome plumbing — keep meta-operations symmetrical
+        # with task spawns).
+        cmd = await self._run_compact_capturing_cmd(
+            runner, browser_enabled=True, mcp_config_json=patchright_json,
+        )
+        assert self._cmd_has_mcp_config(cmd, patchright_json)
+
+    async def _run_cost_capturing_cmd(self, runner, *, browser_enabled=False, mcp_config_json=None):
+        captured: list = []
+
+        async def capture_exec(*args, **kwargs):
+            captured.extend(args)
+            mock_proc = AsyncMock()
+            mock_proc.returncode = 0
+            mock_proc.communicate.return_value = (
+                b'{"type":"result","total_cost_usd":0.01,"duration_ms":100,"duration_api_ms":50}\n',
+                b"",
+            )
+            return mock_proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=capture_exec):
+            await runner._run_cost(
+                session_id="s1",
+                working_dir="/tmp/test",
+                prefix="[test] ",
+                browser_enabled=browser_enabled,
+                mcp_config_json=mcp_config_json,
+            )
+        return captured
+
+    @pytest.mark.asyncio
+    async def test_run_cost_omits_mcp_config_by_default(self, runner):
+        cmd = await self._run_cost_capturing_cmd(runner)
+        assert "--mcp-config" not in cmd
+
+    @pytest.mark.asyncio
+    async def test_run_cost_appends_mcp_config_when_enabled(
+        self, runner, patchright_json
+    ):
+        cmd = await self._run_cost_capturing_cmd(
+            runner, browser_enabled=True, mcp_config_json=patchright_json,
+        )
+        assert self._cmd_has_mcp_config(cmd, patchright_json)
+
+    @pytest.mark.asyncio
+    async def test_run_propagates_mcp_config_through_pipeline(
+        self, runner, mock_card, patchright_json,
+    ):
+        """End-to-end: top-level run() with browser_enabled=True must pass
+        the patchright JSON down to the pre-compact + run_once + cost call
+        chain (every claude spawn carries `--mcp-config <json>`)."""
+        captured_cmds: list[list] = []
+
+        async def capture_exec(*args, **kwargs):
+            captured_cmds.append(list(args))
+            mock_proc = AsyncMock()
+            mock_proc.returncode = 0
+            mock_proc.communicate.return_value = (
+                b'{"type":"result","session_id":"s2","result":"ok","total_cost_usd":0.01,"duration_ms":100,"duration_api_ms":50}\n',
+                b"",
+            )
+            return mock_proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=capture_exec):
+            await runner.run(
+                card=mock_card,
+                project="test",
+                session_id="prior-session",
+                working_dir="/tmp/test",
+                last_card_id="some-other-card",  # forces pre-compact
+                browser_enabled=True,
+                mcp_config_json=patchright_json,
+            )
+
+        assert len(captured_cmds) >= 2  # pre-compact + run_once minimum
+        for cmd in captured_cmds:
+            assert self._cmd_has_mcp_config(cmd, patchright_json), (
+                f"--mcp-config missing from {cmd}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_run_without_browser_enabled_omits_mcp_config(
+        self, runner, mock_card,
+    ):
+        """Default path: no browser_enabled → no --mcp-config on any spawn,
+        guaranteeing existing setups see no behavioural change."""
+        captured_cmds: list[list] = []
+
+        async def capture_exec(*args, **kwargs):
+            captured_cmds.append(list(args))
+            mock_proc = AsyncMock()
+            mock_proc.returncode = 0
+            mock_proc.communicate.return_value = (
+                b'{"type":"result","session_id":"s2","result":"ok","total_cost_usd":0.01,"duration_ms":100,"duration_api_ms":50}\n',
+                b"",
+            )
+            return mock_proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=capture_exec):
+            await runner.run(
+                card=mock_card,
+                project="test",
+                session_id="prior-session",
+                working_dir="/tmp/test",
+                last_card_id="some-other-card",
+            )
+
+        assert len(captured_cmds) >= 2
+        for cmd in captured_cmds:
+            assert "--mcp-config" not in cmd

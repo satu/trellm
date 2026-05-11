@@ -578,6 +578,8 @@ class ClaudeRunner:
         working_dir: Optional[str],
         prefix: str,
         compact_prompt: Optional[str] = None,
+        browser_enabled: bool = False,
+        mcp_config_json: Optional[str] = None,
     ) -> Optional[str]:
         """Run /compact command on a session to reduce context size.
 
@@ -586,6 +588,11 @@ class ClaudeRunner:
             working_dir: Working directory for Claude Code
             prefix: Project prefix for logging
             compact_prompt: Optional custom instructions for compaction
+            browser_enabled: If True and mcp_config_json is provided, append
+                `--mcp-config <json>` so the patchright MCP server loads in
+                the post-compact session.
+            mcp_config_json: JSON blob for `claude --mcp-config`. Built by
+                Config.patchright_mcp_config_json().
 
         Returns:
             New session ID if successful, None otherwise
@@ -622,6 +629,9 @@ class ClaudeRunner:
 
         if self.yolo:
             cmd.append("--dangerously-skip-permissions")
+
+        if browser_enabled and mcp_config_json:
+            cmd.extend(["--mcp-config", mcp_config_json])
 
         cwd = Path(working_dir).expanduser() if working_dir else None
 
@@ -729,6 +739,8 @@ class ClaudeRunner:
         session_id: str,
         working_dir: Optional[str],
         prefix: str,
+        browser_enabled: bool = False,
+        mcp_config_json: Optional[str] = None,
     ) -> Optional[CostInfo]:
         """Run /cost command on a session to get usage statistics.
 
@@ -736,6 +748,10 @@ class ClaudeRunner:
             session_id: The session ID to get cost for
             working_dir: Working directory for Claude Code
             prefix: Project prefix for logging
+            browser_enabled: If True and mcp_config_json is provided, append
+                `--mcp-config <json>` so the spawn stays symmetrical with
+                the task spawn it follows (the MCP server is cheap to load).
+            mcp_config_json: JSON blob for `claude --mcp-config`.
 
         Returns:
             CostInfo with usage statistics, or None if failed
@@ -752,6 +768,9 @@ class ClaudeRunner:
 
         if self.yolo:
             cmd.append("--dangerously-skip-permissions")
+
+        if browser_enabled and mcp_config_json:
+            cmd.extend(["--mcp-config", mcp_config_json])
 
         cwd = Path(working_dir).expanduser() if working_dir else None
 
@@ -824,6 +843,8 @@ class ClaudeRunner:
         last_card_id: Optional[str] = None,
         compact_prompt: Optional[str] = None,
         output_callback: Optional[callable] = None,
+        browser_enabled: bool = False,
+        mcp_config_json: Optional[str] = None,
     ) -> ClaudeResult:
         """Run Claude Code as a subprocess with the given task.
 
@@ -842,6 +863,12 @@ class ClaudeRunner:
             working_dir: Working directory for Claude Code
             last_card_id: Optional card ID of the last processed card for this project
             compact_prompt: Optional custom instructions for /compact
+            output_callback: Optional callable that receives streamed decoded output.
+            browser_enabled: If True and mcp_config_json is set, every spawn in
+                this pipeline (_run_compact, _run_once, _run_cost) carries
+                `--mcp-config <json>`. Off by default — feature is opt-in.
+            mcp_config_json: JSON config string for `claude --mcp-config`.
+                Typically built by Config.patchright_mcp_config_json().
 
         Returns:
             ClaudeResult with success status, new session ID, and output
@@ -865,6 +892,8 @@ class ClaudeRunner:
                 working_dir=working_dir,
                 prefix=prefix,
                 compact_prompt=compact_prompt,
+                browser_enabled=browser_enabled,
+                mcp_config_json=mcp_config_json,
             )
             if new_session_id:
                 current_session_id = new_session_id
@@ -885,6 +914,8 @@ class ClaudeRunner:
                     working_dir=working_dir,
                     prefix=prefix,
                     output_callback=output_callback,
+                    browser_enabled=browser_enabled,
+                    mcp_config_json=mcp_config_json,
                 )
 
                 # Get cost info after successful execution
@@ -893,6 +924,8 @@ class ClaudeRunner:
                         session_id=result.session_id,
                         working_dir=working_dir,
                         prefix=prefix,
+                        browser_enabled=browser_enabled,
+                        mcp_config_json=mcp_config_json,
                     )
                     result.cost_info = cost_info
                     if cost_info:
@@ -946,6 +979,8 @@ class ClaudeRunner:
                     working_dir=working_dir,
                     prefix=prefix,
                     compact_prompt=compact_prompt,
+                    browser_enabled=browser_enabled,
+                    mcp_config_json=mcp_config_json,
                 )
 
                 if new_session_id:
@@ -1009,6 +1044,8 @@ class ClaudeRunner:
         working_dir: Optional[str],
         prefix: str,
         output_callback: Optional[callable] = None,
+        browser_enabled: bool = False,
+        mcp_config_json: Optional[str] = None,
     ) -> ClaudeResult:
         """Run Claude Code once without retry logic.
 
@@ -1019,6 +1056,10 @@ class ClaudeRunner:
             working_dir: Working directory for Claude Code
             prefix: Project prefix for logging
             output_callback: Optional callback for stderr lines (for web dashboard streaming)
+            browser_enabled: If True and mcp_config_json is provided, append
+                `--mcp-config <json>` so claude loads the patchright MCP.
+            mcp_config_json: JSON config blob (typically built by
+                Config.patchright_mcp_config_json()).
 
         Returns:
             ClaudeResult with success status, new session ID, and output
@@ -1047,6 +1088,9 @@ class ClaudeRunner:
 
         if self.yolo:
             cmd.append("--dangerously-skip-permissions")
+
+        if browser_enabled and mcp_config_json:
+            cmd.extend(["--mcp-config", mcp_config_json])
 
         if session_id:
             cmd.extend(["--resume", session_id])

@@ -33,6 +33,17 @@ claude:
   # maintenance:
   #   enabled: true
   #   interval: 10  # Run maintenance every N tickets
+  # Global patchright-mcp browser settings (applies to all projects unless
+  # overridden). When enabled, every `claude` spawn for the project gets
+  # `--mcp-config` pointing at the locally-built patchright-mcp-lite so the
+  # claude subprocess can drive Chrome over CDP at localhost:9222. Requires
+  # the browser stack (scripts/start-browser.sh) running and patchright-mcp-
+  # lite built (npm install && npm run build in ~/src/patchright-mcp-lite).
+  # Off by default — opt in once the stack is verified.
+  # browser:
+  #   enabled: true
+  #   # Optional: override the patchright-mcp-lite entry point path.
+  #   # patchright_path: "~/src/patchright-mcp-lite/dist/index.js"
   # Per-project configuration
   projects:
     # Project name matches first word of card name
@@ -49,6 +60,11 @@ claude:
       # maintenance:
       #   enabled: true
       #   interval: 10
+      # Optional: per-project browser override (overrides global). Use to
+      # phase patchright-mcp in/out one project at a time.
+      # browser:
+      #   enabled: true
+      #   # patchright_path: "~/src/patchright-mcp-lite/dist/index.js"
 
 state:
   # Where to store session IDs and processed card tracking

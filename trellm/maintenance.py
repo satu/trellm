@@ -109,6 +109,8 @@ async def _run_compact(
     claude_config: ClaudeConfig,
     prefix: str,
     compact_prompt: Optional[str] = None,
+    browser_enabled: bool = False,
+    mcp_config_json: Optional[str] = None,
 ) -> Optional[str]:
     """Run /compact command on a session to reduce context size.
 
@@ -118,6 +120,10 @@ async def _run_compact(
         claude_config: Claude configuration
         prefix: Project prefix for logging
         compact_prompt: Optional custom instructions for compaction
+        browser_enabled: If True and mcp_config_json is provided, append
+            `--mcp-config <json>` so the patchright MCP loads in the
+            post-compact session.
+        mcp_config_json: JSON config string for `claude --mcp-config`.
 
     Returns:
         New session ID if successful, None otherwise
@@ -142,6 +148,9 @@ async def _run_compact(
 
     if claude_config.yolo:
         cmd.append("--dangerously-skip-permissions")
+
+    if browser_enabled and mcp_config_json:
+        cmd.extend(["--mcp-config", mcp_config_json])
 
     cwd = Path(working_dir).expanduser()
 
@@ -208,6 +217,8 @@ async def run_maintenance(
     trello_client: Optional[TrelloClient] = None,
     icebox_list_id: Optional[str] = None,
     compact_prompt: Optional[str] = None,
+    browser_enabled: bool = False,
+    mcp_config_json: Optional[str] = None,
 ) -> MaintenanceResult:
     """Run the maintenance skill for a project.
 
@@ -248,6 +259,8 @@ async def run_maintenance(
             claude_config=claude_config,
             prefix=prefix,
             compact_prompt=compact_prompt,
+            browser_enabled=browser_enabled,
+            mcp_config_json=mcp_config_json,
         )
         if compacted_session_id:
             current_session_id = compacted_session_id
@@ -276,6 +289,9 @@ async def run_maintenance(
 
     if claude_config.yolo:
         cmd.append("--dangerously-skip-permissions")
+
+    if browser_enabled and mcp_config_json:
+        cmd.extend(["--mcp-config", mcp_config_json])
 
     if current_session_id:
         cmd.extend(["--resume", current_session_id])

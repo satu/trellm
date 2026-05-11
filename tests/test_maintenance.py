@@ -1316,3 +1316,106 @@ class TestTrelloClientMethods:
                 "/cards/card-123",
                 json_data={"desc": "New description"},
             )
+
+
+class TestMaintenanceMcpConfigFlag:
+    """M2 — verify run_maintenance + its inner _run_compact propagate the
+    `--mcp-config <patchright-json>` flag so maintenance runs share the same
+    patchright MCP attachment as task spawns when the project has it
+    enabled."""
+
+    _PATCHRIGHT_JSON = json.dumps(
+        {"mcpServers": {"patchright": {"command": "node", "args": ["/p/dist/index.js"]}}}
+    )
+
+    @staticmethod
+    def _cmd_has_mcp_config(cmd_args, expected_json):
+        cmd_list = list(cmd_args)
+        for i, token in enumerate(cmd_list):
+            if token == "--mcp-config":
+                return i + 1 < len(cmd_list) and cmd_list[i + 1] == expected_json
+        return False
+
+    @pytest.mark.asyncio
+    async def test_maintenance_omits_mcp_config_by_default(self, tmp_path):
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate = AsyncMock(
+            return_value=(
+                b'{"type":"result","result":"ok","session_id":"s1"}\n',
+                b"",
+            )
+        )
+        with patch(
+            "asyncio.create_subprocess_exec", return_value=mock_proc
+        ) as mock_exec:
+            await run_maintenance(
+                project="p", working_dir=str(tmp_path), session_id=None,
+                claude_config=ClaudeConfig(binary="claude", timeout=60),
+                maintenance_config=MaintenanceConfig(enabled=True, interval=10),
+                ticket_count=10, last_maintenance=None,
+            )
+            assert "--mcp-config" not in mock_exec.call_args[0]
+
+    @pytest.mark.asyncio
+    async def test_maintenance_appends_mcp_config_when_enabled(self, tmp_path):
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate = AsyncMock(
+            return_value=(
+                b'{"type":"result","result":"ok","session_id":"s1"}\n',
+                b"",
+            )
+        )
+        with patch(
+            "asyncio.create_subprocess_exec", return_value=mock_proc
+        ) as mock_exec:
+            await run_maintenance(
+                project="p", working_dir=str(tmp_path), session_id=None,
+                claude_config=ClaudeConfig(binary="claude", timeout=60),
+                maintenance_config=MaintenanceConfig(enabled=True, interval=10),
+                ticket_count=10, last_maintenance=None,
+                browser_enabled=True,
+                mcp_config_json=self._PATCHRIGHT_JSON,
+            )
+            assert self._cmd_has_mcp_config(
+                mock_exec.call_args[0], self._PATCHRIGHT_JSON
+            )
+
+    @pytest.mark.asyncio
+    async def test_maintenance_compact_path_carries_mcp_config(self, tmp_path):
+        """When maintenance compacts an existing session before running,
+        the compact spawn must also carry --mcp-config — otherwise the
+        patchright MCP would not be loaded for the compact subprocess and
+        the post-compact session would lose the attachment."""
+        compact_proc = AsyncMock()
+        compact_proc.returncode = 0
+        compact_proc.communicate = AsyncMock(
+            return_value=(b'{"session_id":"compacted"}\n', b""),
+        )
+        maint_proc = AsyncMock()
+        maint_proc.returncode = 0
+        maint_proc.communicate = AsyncMock(
+            return_value=(
+                b'{"type":"result","result":"ok","session_id":"after"}\n',
+                b"",
+            )
+        )
+        with patch(
+            "asyncio.create_subprocess_exec",
+            side_effect=[compact_proc, maint_proc],
+        ) as mock_exec:
+            await run_maintenance(
+                project="p", working_dir=str(tmp_path),
+                session_id="prior",  # forces a /compact pre-step
+                claude_config=ClaudeConfig(binary="claude", timeout=60),
+                maintenance_config=MaintenanceConfig(enabled=True, interval=10),
+                ticket_count=10, last_maintenance=None,
+                browser_enabled=True,
+                mcp_config_json=self._PATCHRIGHT_JSON,
+            )
+            assert mock_exec.call_count == 2
+            for call in mock_exec.call_args_list:
+                assert self._cmd_has_mcp_config(
+                    call.args, self._PATCHRIGHT_JSON
+                ), f"--mcp-config missing from spawn: {call.args}"

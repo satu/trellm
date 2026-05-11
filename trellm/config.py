@@ -1,11 +1,17 @@
 """Configuration loading for TreLLM."""
 
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 import yaml
+
+# Default location of the locally-built patchright-mcp-lite entry point.
+# Used when BrowserConfig.patchright_path isn't overridden — see
+# docs/patchright-mcp.md §6 / M2.
+DEFAULT_PATCHRIGHT_PATH = "~/src/patchright-mcp-lite/dist/index.js"
 
 
 @dataclass
@@ -33,6 +39,20 @@ class MaintenanceConfig:
 
 
 @dataclass
+class BrowserConfig:
+    """Controls whether each `claude` subprocess spawn carries
+    `--mcp-config <json>` pointing at patchright-mcp-lite.
+
+    Off by default. Opt in once patchright-mcp-lite is built and the host
+    browser stack (scripts/start-browser.sh) is reachable on CDP port 9222.
+    `patchright_path` lets us point at a non-default checkout (e.g. CI).
+    """
+
+    enabled: bool = False
+    patchright_path: Optional[str] = None
+
+
+@dataclass
 class ProjectConfig:
     """Per-project configuration."""
 
@@ -41,6 +61,8 @@ class ProjectConfig:
     compact_prompt: Optional[str] = None  # Custom instructions for /compact
     maintenance: Optional[MaintenanceConfig] = None
     aliases: list[str] = field(default_factory=list)  # Short names that map to this project
+    # Per-project override of the global browser setting. None = inherit global.
+    browser: Optional[BrowserConfig] = None
 
 
 @dataclass
@@ -53,6 +75,9 @@ class ClaudeConfig:
     projects: dict[str, ProjectConfig] = field(default_factory=dict)
     # Global maintenance settings (applies to all projects unless overridden)
     maintenance: Optional[MaintenanceConfig] = None
+    # Global patchright-mcp browser setting (applies to all projects unless
+    # overridden per-project). See BrowserConfig.
+    browser: Optional[BrowserConfig] = None
 
 
 @dataclass
@@ -126,6 +151,53 @@ class Config:
         # Fall back to global config
         return self.claude.maintenance
 
+    def is_browser_enabled(self, project: str) -> bool:
+        """Whether the claude subprocess for this project should be spawned
+        with `--mcp-config <patchright>`. Per-project override > global > False.
+        Absence at both levels (and an unknown project name) yields False
+        so existing setups see no behavioural change."""
+        proj = self.claude.projects.get(project)
+        if proj is not None and proj.browser is not None:
+            return proj.browser.enabled
+        if self.claude.browser is not None:
+            return self.claude.browser.enabled
+        return False
+
+    def patchright_mcp_config_json(self) -> str:
+        """Build the JSON config blob that `claude --mcp-config <json>` reads
+        to discover the patchright MCP server.
+
+        The blob declares a single `patchright` server that runs the local
+        patchright-mcp-lite via node, with the CDP endpoint and the browser
+        restart command supplied via env vars (consumed by
+        patchright-mcp-lite/src/connection.ts).
+        """
+        patchright_path = (
+            self.claude.browser.patchright_path
+            if self.claude.browser is not None
+            and self.claude.browser.patchright_path
+            else DEFAULT_PATCHRIGHT_PATH
+        )
+        patchright_path = str(Path(patchright_path).expanduser())
+        restart_cmd = (
+            str(Path(__file__).resolve().parent.parent / "scripts" / "start-browser.sh")
+            + " start"
+        )
+        return json.dumps(
+            {
+                "mcpServers": {
+                    "patchright": {
+                        "command": "node",
+                        "args": [patchright_path],
+                        "env": {
+                            "CDP_ENDPOINT": "http://localhost:9222",
+                            "BROWSER_RESTART_CMD": restart_cmd,
+                        },
+                    }
+                }
+            }
+        )
+
 
 def load_config(config_path: Optional[str] = None) -> Config:
     """Load configuration from file and environment variables.
@@ -179,12 +251,22 @@ def load_config(config_path: Optional[str] = None) -> Config:
                 interval=maint_data.get("interval", 10),
             )
 
+        # Parse per-project browser override if present
+        proj_browser_data = proj_data.get("browser")
+        proj_browser = None
+        if proj_browser_data is not None:
+            proj_browser = BrowserConfig(
+                enabled=proj_browser_data.get("enabled", False),
+                patchright_path=proj_browser_data.get("patchright_path"),
+            )
+
         projects[name] = ProjectConfig(
             working_dir=proj_data.get("working_dir", ""),
             session_id=proj_data.get("session_id"),
             compact_prompt=proj_data.get("compact_prompt"),
             maintenance=maintenance,
             aliases=proj_data.get("aliases", []),
+            browser=proj_browser,
         )
 
     # Parse global maintenance config if present
@@ -196,6 +278,15 @@ def load_config(config_path: Optional[str] = None) -> Config:
             interval=global_maint_data.get("interval", 10),
         )
 
+    # Parse global browser config if present
+    global_browser_data = claude_data.get("browser")
+    global_browser = None
+    if global_browser_data is not None:
+        global_browser = BrowserConfig(
+            enabled=global_browser_data.get("enabled", False),
+            patchright_path=global_browser_data.get("patchright_path"),
+        )
+
     # Build Claude config
     claude = ClaudeConfig(
         binary=claude_data.get("binary", "claude"),
@@ -203,6 +294,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
         yolo=claude_data.get("yolo", False),
         projects=projects,
         maintenance=global_maintenance,
+        browser=global_browser,
     )
 
     # Build web config
