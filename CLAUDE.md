@@ -18,6 +18,8 @@ trellm --once          # Process one batch and exit
 trellm -v              # Verbose logging
 ```
 
+**Entrypoint**: `start-trellm.sh` is the canonical long-running entrypoint (Docker-compatible: ensures venv, installs the package, optionally brings up the patchright browser stack, then runs `trellm -v`). The `trellm` CLI is fine for one-shots. The earlier systemd-user-service path is retired.
+
 ## Architecture
 
 TreLLM is a polling-based automation tool that bridges Trello boards with Claude Code:
@@ -29,6 +31,7 @@ TreLLM is a polling-based automation tool that bridges Trello boards with Claude
 - **`state.py`**: JSON-based state persistence for session IDs, ticket counts, and maintenance timestamps
 - **`maintenance.py`**: Periodic maintenance skill that runs every N tickets
 - **`web/server.py`**: Embedded aiohttp web dashboard with REST API, SSE streaming, usage caching, and task history
+- **`docs/`**: Long-form investigation and decision notes for cards that produce no code change (e.g. `prd-web-dashboard.md`, `patchright-mcp.md`). Future investigation cards should land their findings here.
 
 ## Key Patterns
 
@@ -117,6 +120,8 @@ Don't cache 429 errors — allow retry on next request. Use Claude Code's `User-
 6. **Usage API 429** - The Anthropic usage API requires the correct `User-Agent` header (matching Claude Code's version) and aggressive rate limiting (5-minute cooldown). Caching failures or starting cooldown on errors causes cascading issues.
 
 7. **Stale session IDs** - Sessions can become invalid (e.g., after Claude Code updates). `claude.py` detects "session not found" errors via `SESSION_NOT_FOUND_PATTERN` and retries without the session ID.
+
+8. **Claude org/monthly limit pauses polling globally** - When Claude returns "you've hit your org's monthly usage limit", `claude.py` raises `MonthlyLimitError` (intentionally NOT a `RateLimitError` subclass, so the in-process retry loop doesn't swallow it). `__main__.py` then pauses the **global** polling loop via `is_globally_rate_limited()` for a default 1 hour — not per-card and not per-project, since org limits are org-wide. Cards stay in TODO; commands (`/abort`, `/restart`, etc.) still work. See commit `6f31e07` for the original incident (44 retries in production before the fix).
 
 ## Testing
 
