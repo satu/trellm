@@ -96,6 +96,7 @@
                         <th>Project</th>
                         <th>Card</th>
                         <th>Duration</th>
+                        <th>Tokens</th>
                         <th>Completed</th>
                         <th>Output</th>
                     </tr>
@@ -130,23 +131,6 @@
             <div id="stats-global" class="tab-content active"></div>
             <div id="stats-last30" class="tab-content"></div>
             <div id="stats-by-project" class="tab-content"></div>
-        </section>
-
-        <section id="history-section" class="card">
-            <h2>Recent History</h2>
-            <table id="history-table">
-                <thead>
-                    <tr>
-                        <th class="sortable" data-sort="project" onclick="sortHistory('project')">Project</th>
-                        <th class="sortable" data-sort="cost" onclick="sortHistory('cost')">Cost</th>
-                        <th class="sortable" data-sort="duration" onclick="sortHistory('duration')">Duration</th>
-                        <th>Changes</th>
-                        <th>Tokens</th>
-                        <th class="sortable" data-sort="when" onclick="sortHistory('when')">When</th>
-                    </tr>
-                </thead>
-                <tbody id="history-body"></tbody>
-            </table>
         </section>
 
         <section id="config-section" class="card">

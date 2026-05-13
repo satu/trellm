@@ -586,8 +586,19 @@ class WebServer:
 
     async def _handle_completed(self, request: web.Request) -> web.Response:
         now = time.time()
+        # Index the latest ticket_history entry per card so the completed
+        # list can surface token counts without each task needing its own
+        # cost plumbing. The history list is ordered oldest -> newest, so
+        # the last entry for a given card_id is the freshest run.
+        history = self.state.state.get("stats", {}).get("ticket_history", [])
+        latest_by_card: dict[str, dict] = {}
+        for entry in history:
+            cid = entry.get("card_id")
+            if cid:
+                latest_by_card[cid] = entry
         completed = []
         for t in self._completed_tasks:
+            hist = latest_by_card.get(t["card_id"], {})
             completed.append({
                 "card_id": t["card_id"],
                 "run_id": t.get("run_id", t["card_id"]),
@@ -597,6 +608,8 @@ class WebServer:
                 "duration_seconds": int(t["completed_at"] - t["started_at"]),
                 "completed_ago_seconds": int(now - t["completed_at"]),
                 "output_lines": len(t.get("output", [])),
+                "input_tokens": hist.get("input_tokens", 0),
+                "output_tokens": hist.get("output_tokens", 0),
             })
         return web.json_response({"completed": completed})
 

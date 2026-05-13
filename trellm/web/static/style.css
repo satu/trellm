@@ -173,16 +173,11 @@ td a:hover {
     margin-left: 8px;
 }
 
-.project-details {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-    gap: 8px;
-    margin-top: 6px;
+.project-tickets {
     font-size: 0.85rem;
-}
-
-.project-details .label {
     color: #8b949e;
+    margin-left: 8px;
+    font-variant-numeric: tabular-nums;
 }
 
 .stats-tabs {
@@ -394,25 +389,6 @@ td a:hover {
     overflow-y: auto;
     white-space: pre-wrap;
     word-break: break-all;
-}
-
-.sortable {
-    cursor: pointer;
-    user-select: none;
-}
-
-.sortable:hover {
-    color: #58a6ff;
-}
-
-.sortable.asc::after {
-    content: " \25b2";
-    font-size: 0.6rem;
-}
-
-.sortable.desc::after {
-    content: " \25bc";
-    font-size: 0.6rem;
 }
 
 footer {

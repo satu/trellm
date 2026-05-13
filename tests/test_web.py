@@ -1011,6 +1011,79 @@ class TestWebServerCompletedTasks:
             assert data["completed"][0]["card_name"] == "test card"
             assert data["completed"][0]["output_lines"] == 1
 
+    @pytest.mark.asyncio
+    async def test_completed_includes_tokens_from_history(self, web_server):
+        """Recent Completions should surface tokens for each finished card
+        so users don't need a separate history view to see usage."""
+        web_server.state.record_cost(
+            card_id="card1",
+            project="proj",
+            total_cost="$1.00",
+            api_duration="1m",
+            wall_duration="2m",
+            code_changes="+10 -5",
+            input_tokens=12345,
+            output_tokens=678,
+        )
+        web_server.track_task("card1", "proj", "test card", "http://example.com")
+        web_server.append_output("card1", "line\n")
+        web_server.untrack_task("card1")
+        app = web_server._create_app()
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/completed")
+            data = await resp.json()
+            assert data["completed"][0]["input_tokens"] == 12345
+            assert data["completed"][0]["output_tokens"] == 678
+
+    @pytest.mark.asyncio
+    async def test_completed_tokens_zero_without_history(self, web_server):
+        """Falls back to zero tokens when no record_cost was made — keeps
+        the API contract uniform regardless of whether stats landed."""
+        web_server.track_task("card1", "proj", "test card", "http://example.com")
+        web_server.append_output("card1", "line\n")
+        web_server.untrack_task("card1")
+        app = web_server._create_app()
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/completed")
+            data = await resp.json()
+            assert data["completed"][0]["input_tokens"] == 0
+            assert data["completed"][0]["output_tokens"] == 0
+
+    @pytest.mark.asyncio
+    async def test_completed_uses_most_recent_history_for_card(self, web_server):
+        """If a card was retried, the most recent ticket_history entry for
+        that card_id is what users care about (earlier failed runs may have
+        smaller token counts)."""
+        web_server.state.record_cost(
+            card_id="card1",
+            project="proj",
+            total_cost="$0.10",
+            api_duration="10s",
+            wall_duration="20s",
+            code_changes="",
+            input_tokens=100,
+            output_tokens=10,
+        )
+        web_server.state.record_cost(
+            card_id="card1",
+            project="proj",
+            total_cost="$1.00",
+            api_duration="1m",
+            wall_duration="2m",
+            code_changes="+1 -1",
+            input_tokens=9999,
+            output_tokens=888,
+        )
+        web_server.track_task("card1", "proj", "test card", "http://example.com")
+        web_server.append_output("card1", "line\n")
+        web_server.untrack_task("card1")
+        app = web_server._create_app()
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/completed")
+            data = await resp.json()
+            assert data["completed"][0]["input_tokens"] == 9999
+            assert data["completed"][0]["output_tokens"] == 888
+
 
 class TestWebServerSSEStream:
     """Tests for SSE streaming endpoint."""

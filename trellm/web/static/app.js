@@ -6,9 +6,6 @@
     let timer = null;
     let activeStream = null;  // Current EventSource for live output
     let activeCardId = null;  // Card ID being streamed
-    let historyData = [];     // Cached history data for sorting
-    let historySortKey = "when";
-    let historySortAsc = false;
 
     async function fetchJSON(url) {
         const resp = await fetch(url);
@@ -149,18 +146,19 @@
             return;
         }
 
+        // Drastic simplification — only ticket count is reliable per the
+        // current data model, so we drop cost/changes/last-activity and
+        // show a one-line summary per project.
         container.innerHTML = data.projects.map(function(p) {
             const aliases = p.aliases.length > 0
-                ? '<span class="project-aliases">(' + p.aliases.join(", ") + ')</span>'
+                ? '<span class="project-aliases">(' + escapeHtml(p.aliases.join(", ")) + ')</span>'
                 : '';
+            const n = p.stats.total_tickets;
+            const label = n === 1 ? 'ticket' : 'tickets';
             return '<div class="project-item">' +
-                '<div><span class="project-name">' + escapeHtml(p.name) + '</span>' + aliases + '</div>' +
-                '<div class="project-details">' +
-                '<div><span class="label">Cost: </span>' + p.stats.total_cost_dollars + '</div>' +
-                '<div><span class="label">Tickets: </span>' + p.stats.total_tickets + '</div>' +
-                '<div><span class="label">Changes: </span>+' + p.stats.total_lines_added + ' -' + p.stats.total_lines_removed + '</div>' +
-                '<div><span class="label">Last: </span>' + formatTime(p.last_activity) + '</div>' +
-                '</div></div>';
+                '<span class="project-name">' + escapeHtml(p.name) + '</span>' + aliases +
+                ' <span class="project-tickets">' + n + ' ' + label + '</span>' +
+                '</div>';
         }).join("");
     }
 
@@ -249,51 +247,6 @@
         return "" + n;
     }
 
-    function renderHistory(data) {
-        historyData = (data.recent_history || []).slice().reverse();
-        renderHistoryTable();
-    }
-
-    function renderHistoryTable() {
-        var tbody = document.getElementById("history-body");
-        if (historyData.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No history</td></tr>';
-            return;
-        }
-
-        var sorted = historyData.slice();
-        sorted.sort(function(a, b) {
-            var va, vb;
-            switch (historySortKey) {
-                case "project": va = a.project || ""; vb = b.project || ""; break;
-                case "cost": va = a.cost_cents || 0; vb = b.cost_cents || 0; break;
-                case "duration": va = a.wall_duration_seconds || 0; vb = b.wall_duration_seconds || 0; break;
-                case "when": va = a.processed_at || ""; vb = b.processed_at || ""; break;
-                default: return 0;
-            }
-            if (va < vb) return historySortAsc ? -1 : 1;
-            if (va > vb) return historySortAsc ? 1 : -1;
-            return 0;
-        });
-
-        // Update sort indicators
-        document.querySelectorAll("#history-table .sortable").forEach(function(th) {
-            th.classList.remove("asc", "desc");
-            if (th.getAttribute("data-sort") === historySortKey) {
-                th.classList.add(historySortAsc ? "asc" : "desc");
-            }
-        });
-
-        tbody.innerHTML = sorted.map(function(h) {
-            var cost = "$" + (h.cost_cents / 100).toFixed(2);
-            var dur = formatDuration(h.wall_duration_seconds || 0);
-            var changes = "+" + (h.lines_added || 0) + " -" + (h.lines_removed || 0);
-            var tokens = formatTokens((h.input_tokens || 0) + (h.output_tokens || 0));
-            var when = formatTime(h.processed_at);
-            return '<tr><td>' + escapeHtml(h.project) + '</td><td>' + cost + '</td><td>' + dur + '</td><td>' + changes + '</td><td>' + tokens + '</td><td>' + when + '</td></tr>';
-        }).join("");
-    }
-
     function escapeHtml(str) {
         // Used for both element content AND attribute values, so " and ' must
         // be escaped — otherwise card names with " (e.g. "trellm clicking on
@@ -324,7 +277,8 @@
                 + ' data-run-id="' + escapeHtml(runId) + '"'
                 + ' data-card-name="' + escapeHtml(t.card_name) + '">View' + lineCount + '</button>';
             var ago = formatDuration(t.completed_ago_seconds) + ' ago';
-            return '<tr><td>' + escapeHtml(t.project) + '</td><td>' + link + '</td><td>' + formatDuration(t.duration_seconds) + '</td><td>' + ago + '</td><td>' + viewBtn + '</td></tr>';
+            var tokens = formatTokens((t.input_tokens || 0) + (t.output_tokens || 0));
+            return '<tr><td>' + escapeHtml(t.project) + '</td><td>' + link + '</td><td>' + formatDuration(t.duration_seconds) + '</td><td>' + tokens + '</td><td>' + ago + '</td><td>' + viewBtn + '</td></tr>';
         }).join("");
     }
 
@@ -345,7 +299,6 @@
             renderProjects(projects);
             renderUsageLimits(stats);
             renderStats(stats);
-            renderHistory(stats);
         } catch (e) {
             var badge = document.getElementById("status-badge");
             badge.textContent = "error";
@@ -497,16 +450,6 @@
             stream.close();
             if (!outputText) content.textContent = "No output available";
         };
-    };
-
-    window.sortHistory = function(key) {
-        if (historySortKey === key) {
-            historySortAsc = !historySortAsc;
-        } else {
-            historySortKey = key;
-            historySortAsc = true;
-        }
-        renderHistoryTable();
     };
 
     window.closeOutput = function() {
