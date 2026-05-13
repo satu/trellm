@@ -7,7 +7,7 @@ import os
 import sys
 import time
 from collections import defaultdict
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from typing import Optional
 
 from .claude import ClaudeRunner, MonthlyLimitError, fetch_claude_usage_limits
@@ -47,6 +47,85 @@ _rate_limit_pause_until: float = 0.0
 # reset time. One hour balances "retry sooner if reset" against "don't waste
 # polls": if still limited after an hour, the next failure renews the pause.
 DEFAULT_MONTHLY_LIMIT_PAUSE_SECONDS = 3600
+
+# Per-card retry state, keyed by card_id. Populated when a card fails and
+# cleared when it succeeds. Powers exponential backoff for fast-failing
+# cards (the global pause only fires for usage-limit errors; other failure
+# modes — timeouts, generic RuntimeErrors — would otherwise busy-loop).
+_card_retry_state: dict[str, "CardRetryState"] = {}
+
+# Threshold below which a failure counts as "fast" and triggers backoff.
+# Failures slower than this consumed real time and aren't busy-loops.
+FAST_FAILURE_THRESHOLD_SECONDS = 60.0
+# Cap on per-card backoff. User constraint: never exceed 30 minutes.
+MAX_BACKOFF_SECONDS = 1800
+# Base backoff in seconds; doubles each consecutive fast failure
+# (30, 60, 120, 240, 480, 960, 1800, ...).
+BASE_BACKOFF_SECONDS = 30
+
+
+@dataclass
+class CardRetryState:
+    """Per-card retry counters and backoff window.
+
+    error_count and timeout_count are mutually exclusive: a single failure
+    increments exactly one of them. fast_failure_streak counts consecutive
+    failures that exited within FAST_FAILURE_THRESHOLD_SECONDS of starting
+    — the indicator the run isn't doing meaningful work and shouldn't be
+    re-spawned immediately.
+    """
+
+    error_count: int = 0
+    timeout_count: int = 0
+    fast_failure_streak: int = 0
+    backoff_until: float = 0.0
+
+    def record_failure(
+        self,
+        duration_seconds: float,
+        is_timeout: bool = False,
+        now: Optional[float] = None,
+    ) -> None:
+        """Update counters and schedule backoff if the failure was fast."""
+        if now is None:
+            now = time.time()
+        if is_timeout:
+            self.timeout_count += 1
+        else:
+            self.error_count += 1
+        if duration_seconds < FAST_FAILURE_THRESHOLD_SECONDS:
+            self.fast_failure_streak += 1
+            backoff = min(
+                BASE_BACKOFF_SECONDS * (2 ** (self.fast_failure_streak - 1)),
+                MAX_BACKOFF_SECONDS,
+            )
+            self.backoff_until = now + backoff
+        else:
+            # Slow failure breaks the streak — next fast failure restarts at 30s
+            self.fast_failure_streak = 0
+
+    def is_in_backoff(self, now: Optional[float] = None) -> bool:
+        if now is None:
+            now = time.time()
+        return self.backoff_until > now
+
+    def seconds_until_resume(self, now: Optional[float] = None) -> int:
+        if now is None:
+            now = time.time()
+        return max(0, int(self.backoff_until - now))
+
+
+def should_skip_card_for_backoff(card_id: str, now: Optional[float] = None) -> bool:
+    """Return True if this card is currently in a per-card backoff window.
+
+    The polling loop calls this before spawning. Cards with no retry state
+    (the common case) always return False — backoff is a recovery mechanism,
+    not a default state.
+    """
+    state = _card_retry_state.get(card_id)
+    if state is None:
+        return False
+    return state.is_in_backoff(now=now)
 
 
 def is_globally_rate_limited() -> bool:
@@ -959,6 +1038,7 @@ async def process_card_for_project(
 
         # Run Claude Code
         succeeded = False
+        run_started_at = time.time()
         try:
             # Set up output callback for web dashboard streaming
             output_cb = None
@@ -1004,6 +1084,10 @@ async def process_card_for_project(
             # Track this ticket for maintenance (unique tickets only)
             state.add_processed_ticket(project, card.id)
 
+            # Success clears any accumulated retry state — next failure
+            # starts a fresh streak at 30s.
+            _card_retry_state.pop(card.id, None)
+
             succeeded = True
             return card.id
 
@@ -1011,7 +1095,9 @@ async def process_card_for_project(
             # Org/monthly usage limit hit — pause ALL processing globally so
             # we don't busy-loop this card (and every other project) against
             # the same shared limit. Card is NOT marked processed so it'll
-            # be retried once the pause expires.
+            # be retried once the pause expires. Don't record per-card
+            # retry state: the global pause already prevents busy-looping,
+            # and counting these would unfairly penalize the card.
             pause = e.reset_seconds or DEFAULT_MONTHLY_LIMIT_PAUSE_SECONDS
             pause_globally(pause)
             logger.error(
@@ -1023,7 +1109,23 @@ async def process_card_for_project(
             )
             return None
         except Exception as e:
-            logger.error("[%s] Failed to process card %s: %s", project, card.id, e)
+            duration = time.time() - run_started_at
+            # 'timed out after' is how claude.py surfaces asyncio.TimeoutError
+            # — categorize separately for dashboard visibility.
+            is_timeout = "timed out after" in str(e).lower()
+            retry_state = _card_retry_state.setdefault(card.id, CardRetryState())
+            retry_state.record_failure(
+                duration_seconds=duration, is_timeout=is_timeout,
+            )
+            logger.error(
+                "[%s] Failed to process card %s (errors=%d timeouts=%d streak=%d, "
+                "backoff %ds): %s",
+                project, card.id,
+                retry_state.error_count, retry_state.timeout_count,
+                retry_state.fast_failure_streak,
+                retry_state.seconds_until_resume(),
+                e,
+            )
             return None
         finally:
             # Always remove from processing set when done
@@ -1081,6 +1183,7 @@ async def run_polling_loop(
             running_tasks=_running_tasks,
             processing_cards=_processing_cards,
             start_time=time.time(),
+            card_retry_state=_card_retry_state,
         )
 
         async def _web_abort() -> None:
@@ -1152,6 +1255,13 @@ async def run_polling_loop(
             try:
                 cards = await trello.get_todo_cards()
                 logger.debug("Found %d cards in TODO", len(cards))
+
+                # Push the TODO snapshot to the dashboard so it can render
+                # the queue (waiting cards + retry/backoff state). Done
+                # here, not on demand, so the snapshot stays in sync with
+                # the polling loop's view of TODO.
+                if _web_server:
+                    _web_server.update_queue(cards)
 
                 # Check for /abort and /restart commands FIRST - they take priority
                 abort_handled = False
@@ -1272,6 +1382,20 @@ async def run_polling_loop(
                             project,
                             card.id,
                             seconds_until_resume(),
+                        )
+                        continue
+
+                    # Skip cards in per-card backoff (fast-fail exponential
+                    # backoff for non-usage-limit failures).
+                    if should_skip_card_for_backoff(card.id):
+                        retry = _card_retry_state[card.id]
+                        logger.info(
+                            "[%s] Skipping card %s: backoff (%ds remaining, "
+                            "errors=%d timeouts=%d streak=%d)",
+                            project, card.id,
+                            retry.seconds_until_resume(),
+                            retry.error_count, retry.timeout_count,
+                            retry.fast_failure_streak,
                         )
                         continue
 

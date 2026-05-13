@@ -80,8 +80,66 @@
             var streamBtn = '<button class="btn-stream" data-action="view-active"'
                 + ' data-card-id="' + escapeHtml(t.card_id) + '"'
                 + ' data-card-name="' + escapeHtml(t.card_name) + '">View' + lineCount + '</button>';
-            return '<tr><td>' + escapeHtml(t.project) + '</td><td>' + link + '</td><td>' + formatDuration(t.duration_seconds) + '</td><td>' + streamBtn + '</td></tr>';
+            // Attempts column: show error/timeout/streak when non-zero.
+            // Empty when this is a fresh first attempt — keeps the table quiet
+            // for the common case.
+            var totalFailures = (t.error_count || 0) + (t.timeout_count || 0);
+            var attempts = '';
+            if (totalFailures > 0) {
+                var parts = [];
+                if (t.error_count) parts.push('errors ' + t.error_count);
+                if (t.timeout_count) parts.push('timeouts ' + t.timeout_count);
+                if (t.fast_failure_streak) parts.push('streak ' + t.fast_failure_streak);
+                attempts = '<span class="retry-badge">' + parts.join(' · ') + '</span>';
+            }
+            return '<tr><td>' + escapeHtml(t.project) + '</td><td>' + link + '</td><td>' + formatDuration(t.duration_seconds) + '</td><td>' + attempts + '</td><td>' + streamBtn + '</td></tr>';
         }).join("");
+    }
+
+    function renderQueue(data) {
+        var section = document.getElementById("queue-section");
+        var body = document.getElementById("queue-body");
+        var entries = data.queue || [];
+        // Filter out entries currently running — those are in the Running Tasks
+        // table. The queue view focuses on waiting cards.
+        var waiting = entries.filter(function(e) { return !e.is_running; });
+        if (waiting.length === 0) {
+            section.classList.add("hidden");
+            return;
+        }
+        section.classList.remove("hidden");
+        // Group by project so the "2+ cards queueing for the same project"
+        // case is immediately visible.
+        var byProject = {};
+        waiting.forEach(function(e) {
+            (byProject[e.project] = byProject[e.project] || []).push(e);
+        });
+        var projects = Object.keys(byProject).sort();
+        body.innerHTML = projects.map(function(project) {
+            var rows = byProject[project].sort(function(a, b) {
+                return (b.queued_for_seconds || 0) - (a.queued_for_seconds || 0);
+            }).map(function(e) {
+                var link = e.card_url
+                    ? '<a href="' + escapeHtml(e.card_url) + '" target="_blank">' + escapeHtml(e.card_name) + '</a>'
+                    : escapeHtml(e.card_name);
+                var queued = e.queued_for_seconds >= 0 ? formatDuration(e.queued_for_seconds) : '-';
+                var retryInfo = '';
+                if (e.retry) {
+                    var bits = [];
+                    if (e.retry.error_count) bits.push('errors ' + e.retry.error_count);
+                    if (e.retry.timeout_count) bits.push('timeouts ' + e.retry.timeout_count);
+                    if (e.retry.backoff_remaining_seconds > 0) {
+                        bits.push('backoff ' + formatDuration(e.retry.backoff_remaining_seconds));
+                    }
+                    if (bits.length) retryInfo = '<span class="retry-badge">' + bits.join(' · ') + '</span>';
+                }
+                return '<tr><td>' + link + '</td><td>' + queued + ' queued</td><td>' + retryInfo + '</td></tr>';
+            }).join('');
+            var count = byProject[project].length;
+            var heading = escapeHtml(project) + ' <span class="queue-count">(' + count + ' waiting)</span>';
+            return '<h3 class="queue-project">' + heading + '</h3>' +
+                '<table class="queue-table"><tbody>' + rows + '</tbody></table>';
+        }).join('');
     }
 
     function renderProjects(data) {
@@ -272,15 +330,17 @@
 
     async function refresh() {
         try {
-            var [status, tasks, projects, stats, completed] = await Promise.all([
+            var [status, tasks, queue, projects, stats, completed] = await Promise.all([
                 fetchJSON("/api/status"),
                 fetchJSON("/api/tasks"),
+                fetchJSON("/api/queue"),
                 fetchJSON("/api/projects"),
                 fetchJSON("/api/stats"),
                 fetchJSON("/api/completed"),
             ]);
             renderStatus(status);
             renderTasks(tasks);
+            renderQueue(queue);
             renderCompleted(completed);
             renderProjects(projects);
             renderUsageLimits(stats);

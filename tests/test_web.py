@@ -172,6 +172,172 @@ class TestWebServerTasks:
             data = await resp.json()
             assert data["tasks"] == []
 
+    async def test_tasks_include_retry_state(self, web_server):
+        """Running tasks must expose retry counters so the dashboard can
+        show 'attempt N' badges. Without this the user can't tell that a
+        running task is actually the 5th attempt at the same card."""
+        from trellm.__main__ import CardRetryState
+
+        # Seed retry state for a card that's now running again
+        web_server.card_retry_state["card-retry-1"] = CardRetryState(
+            error_count=3, timeout_count=1, fast_failure_streak=2,
+        )
+        web_server.track_task(
+            "card-retry-1", "testproject", "Stuck card", "https://trello.com/c/x",
+        )
+        app = web_server._create_app()
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/tasks")
+            data = await resp.json()
+            task = data["tasks"][0]
+            assert task["error_count"] == 3
+            assert task["timeout_count"] == 1
+            assert task["fast_failure_streak"] == 2
+
+
+class TestWebServerQueue:
+    """Tests for /api/queue — the TODO snapshot used to surface cards
+    that are waiting (project busy, or backoff active).
+
+    User ask: 'if there are 2+ cards queueing in TODO for the same
+    projects, show me the cards queued and how long they are queueing
+    for'."""
+
+    async def test_queue_empty_initially(self, client):
+        """Before update_queue is called, /api/queue returns empty."""
+        resp = await client.get("/api/queue")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["queue"] == []
+
+    async def test_queue_reflects_update(self, web_server):
+        """update_queue accepts a list of TrelloCard objects and the
+        endpoint surfaces them."""
+        from trellm.trello import TrelloCard
+
+        web_server.update_queue([
+            TrelloCard(
+                id="card-a", name="testproject task A", description="",
+                url="https://trello.com/c/a",
+                last_activity="2026-05-13T05:00:00Z",
+            ),
+            TrelloCard(
+                id="card-b", name="other task B", description="",
+                url="https://trello.com/c/b",
+                last_activity="2026-05-13T05:30:00Z",
+            ),
+        ])
+        app = web_server._create_app()
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/queue")
+            data = await resp.json()
+            assert len(data["queue"]) == 2
+            ids = [q["card_id"] for q in data["queue"]]
+            assert "card-a" in ids
+            assert "card-b" in ids
+
+    async def test_queue_marks_running_cards(self, web_server):
+        """If a card is currently in _processing_cards, the queue entry
+        must show is_running=True so the dashboard can distinguish
+        running from waiting."""
+        from trellm.trello import TrelloCard
+
+        web_server.processing_cards.add("card-a")
+        web_server.update_queue([
+            TrelloCard(
+                id="card-a", name="testproject task", description="",
+                url="https://trello.com/c/a",
+                last_activity="2026-05-13T05:00:00Z",
+            ),
+            TrelloCard(
+                id="card-b", name="testproject waiting", description="",
+                url="https://trello.com/c/b",
+                last_activity="2026-05-13T05:30:00Z",
+            ),
+        ])
+        app = web_server._create_app()
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/queue")
+            data = await resp.json()
+            by_id = {q["card_id"]: q for q in data["queue"]}
+            assert by_id["card-a"]["is_running"] is True
+            assert by_id["card-b"]["is_running"] is False
+
+    async def test_queue_includes_retry_state(self, web_server):
+        """Cards with accumulated retry state must surface their counters
+        and current backoff so the dashboard can show 'errors=3 timeouts=1
+        backoff 14m'."""
+        import time as time_mod
+        from trellm.__main__ import CardRetryState
+        from trellm.trello import TrelloCard
+
+        retry = CardRetryState(
+            error_count=3, timeout_count=1, fast_failure_streak=2,
+        )
+        retry.backoff_until = time_mod.time() + 60
+        web_server.card_retry_state["card-failing"] = retry
+
+        web_server.update_queue([
+            TrelloCard(
+                id="card-failing", name="testproject stuck", description="",
+                url="https://trello.com/c/x",
+                last_activity="2026-05-13T05:00:00Z",
+            ),
+        ])
+        app = web_server._create_app()
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/queue")
+            data = await resp.json()
+            entry = data["queue"][0]
+            assert entry["retry"]["error_count"] == 3
+            assert entry["retry"]["timeout_count"] == 1
+            assert entry["retry"]["fast_failure_streak"] == 2
+            assert 50 <= entry["retry"]["backoff_remaining_seconds"] <= 60
+
+    async def test_queue_resolves_project_via_alias(self, web_server):
+        """Card 'tp something' must resolve to 'testproject' (which has
+        'tp' as an alias) so the per-project grouping works for aliased
+        cards too."""
+        from trellm.trello import TrelloCard
+
+        web_server.update_queue([
+            TrelloCard(
+                id="card-1", name="tp some work", description="",
+                url="https://trello.com/c/x",
+                last_activity="2026-05-13T05:00:00Z",
+            ),
+        ])
+        app = web_server._create_app()
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/queue")
+            data = await resp.json()
+            entry = data["queue"][0]
+            assert entry["project"] == "testproject"
+
+    async def test_queue_includes_queued_for_seconds(self, web_server):
+        """Each entry must expose how long the card has been in TODO,
+        derived from its last_activity timestamp."""
+        from datetime import datetime, timedelta, timezone
+        from trellm.trello import TrelloCard
+
+        ten_min_ago = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        # Replace +00:00 with Z to match Trello's format (handler must accept either)
+        ten_min_ago_z = ten_min_ago.replace("+00:00", "Z")
+        web_server.update_queue([
+            TrelloCard(
+                id="card-q", name="testproject queued", description="",
+                url="https://trello.com/c/q",
+                last_activity=ten_min_ago_z,
+            ),
+        ])
+        app = web_server._create_app()
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/queue")
+            data = await resp.json()
+            queued = data["queue"][0]["queued_for_seconds"]
+            # Allow ~5s of slop for test execution time
+            assert 595 <= queued <= 615
+
 
 class TestWebServerProjects:
     """Tests for /api/projects endpoint."""

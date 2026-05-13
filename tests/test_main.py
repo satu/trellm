@@ -1359,3 +1359,302 @@ class TestProcessCardForProjectMonthlyLimit:
         assert state.is_processed("abc123") is False
         # Should not have been moved to ready either
         trello.move_to_ready.assert_not_called()
+
+
+class TestCardRetryState:
+    """Tests for per-card retry tracking with exponential backoff.
+
+    Background (card ZCwyx8wO): unrecognized failures (timeouts and other
+    non-usage-limit errors) busy-loop the polling loop because each spawn
+    removes the card from `_processing_cards` in a finally block. A
+    per-card backoff prevents this for failures that exit <1m after start
+    — the indicator that the run isn't doing meaningful work."""
+
+    def test_initial_state_is_zero(self):
+        from trellm.__main__ import CardRetryState
+        s = CardRetryState()
+        assert s.error_count == 0
+        assert s.timeout_count == 0
+        assert s.fast_failure_streak == 0
+        assert s.backoff_until == 0.0
+
+    def test_is_in_backoff_initially_false(self):
+        from trellm.__main__ import CardRetryState
+        s = CardRetryState()
+        assert s.is_in_backoff(now=1000.0) is False
+        assert s.seconds_until_resume(now=1000.0) == 0
+
+    def test_fast_failure_increments_streak_and_sets_backoff(self):
+        """A failure within the fast-fail threshold (default 60s) should
+        increment the streak AND schedule a backoff window."""
+        from trellm.__main__ import CardRetryState
+        s = CardRetryState()
+        s.record_failure(duration_seconds=10.0, now=1000.0)
+        assert s.fast_failure_streak == 1
+        assert s.error_count == 1
+        assert s.backoff_until > 1000.0
+
+    def test_slow_failure_increments_error_count_but_no_backoff(self):
+        """Failures >= 60s after start aren't busy-loops by definition.
+        We still record the error for visibility but DON'T pause."""
+        from trellm.__main__ import CardRetryState
+        s = CardRetryState()
+        s.record_failure(duration_seconds=120.0, now=1000.0)
+        assert s.error_count == 1
+        assert s.fast_failure_streak == 0
+        assert s.backoff_until == 0.0
+
+    def test_slow_failure_resets_fast_streak(self):
+        """A slow failure breaks a fast-failure streak — the card got
+        somewhere this time, so the next fast failure starts from 30s
+        again, not whatever the previous streak was scheduling."""
+        from trellm.__main__ import CardRetryState
+        s = CardRetryState()
+        # Pretend we'd already had 3 fast failures
+        s.fast_failure_streak = 3
+        s.record_failure(duration_seconds=120.0, now=1000.0)
+        assert s.fast_failure_streak == 0
+
+    def test_exponential_backoff_schedule(self):
+        """Backoff follows 30 * 2**(streak-1), capped at 1800 (30min).
+        User constraint: 'in any case the retry timeout should be no
+        more than 30 mins'."""
+        from trellm.__main__ import CardRetryState
+        expected_backoff_seconds = [30, 60, 120, 240, 480, 960, 1800, 1800, 1800]
+        s = CardRetryState()
+        for i, expected in enumerate(expected_backoff_seconds, start=1):
+            s.record_failure(duration_seconds=10.0, now=1000.0)
+            actual = s.backoff_until - 1000.0
+            assert actual == expected, (
+                f"streak {i}: expected {expected}s, got {actual}s"
+            )
+
+    def test_backoff_caps_at_30_minutes(self):
+        """User explicitly capped backoff at 30min — even after many
+        consecutive fast failures, never exceed 1800s."""
+        from trellm.__main__ import CardRetryState
+        s = CardRetryState()
+        # Force a very high streak directly
+        s.fast_failure_streak = 100
+        s.record_failure(duration_seconds=10.0, now=1000.0)
+        assert s.backoff_until - 1000.0 == 1800
+
+    def test_timeout_failure_increments_timeout_count(self):
+        """Timeouts are categorized separately for dashboard display."""
+        from trellm.__main__ import CardRetryState
+        s = CardRetryState()
+        s.record_failure(duration_seconds=1200.0, is_timeout=True, now=1000.0)
+        assert s.timeout_count == 1
+        assert s.error_count == 0  # mutually exclusive — not double-counted
+
+    def test_is_in_backoff_during_and_after_window(self):
+        from trellm.__main__ import CardRetryState
+        s = CardRetryState()
+        s.record_failure(duration_seconds=10.0, now=1000.0)
+        # 30s backoff: still active at 1020, gone at 1050
+        assert s.is_in_backoff(now=1020.0) is True
+        assert s.is_in_backoff(now=1050.0) is False
+
+    def test_seconds_until_resume_returns_remaining(self):
+        from trellm.__main__ import CardRetryState
+        s = CardRetryState()
+        s.record_failure(duration_seconds=10.0, now=1000.0)
+        # 30s backoff: 20s remaining at t=1010
+        assert s.seconds_until_resume(now=1010.0) == 20
+        # 0 once expired
+        assert s.seconds_until_resume(now=1100.0) == 0
+
+
+class TestProcessCardFailureRecording:
+    """Tests for process_card_for_project recording failures in
+    _card_retry_state. Three concerns: (1) generic RuntimeError increments
+    error_count; (2) 'timed out after' string sets is_timeout; (3) success
+    clears the retry entry."""
+
+    def setup_method(self) -> None:
+        from trellm import __main__ as main_mod
+        main_mod._rate_limit_pause_until = 0.0
+        main_mod._card_retry_state.clear()
+
+    def _make_config(self) -> Config:
+        return Config(
+            trello=TrelloConfig(
+                api_key="key", api_token="token", board_id="board",
+                todo_list_id="todo", ready_to_try_list_id="ready",
+            ),
+            claude=ClaudeConfig(
+                binary="claude", timeout=60,
+                projects={
+                    "testproject": ProjectConfig(working_dir="/tmp/testproject"),
+                },
+            ),
+        )
+
+    def _make_card(self) -> TrelloCard:
+        return TrelloCard(
+            id="card-fail-1",
+            name="testproject do thing",
+            description="",
+            url="https://trello.com/c/card-fail-1",
+            last_activity="2026-05-13T10:00:00Z",
+        )
+
+    @pytest.mark.asyncio
+    async def test_generic_runtime_error_records_error(self, tmp_path):
+        """A RuntimeError from claude.run() must register as an error in
+        _card_retry_state so the polling loop can apply backoff."""
+        from trellm.state import StateManager
+        from trellm.__main__ import process_card_for_project, _card_retry_state
+
+        state = StateManager(str(tmp_path / "state.json"))
+        config = self._make_config()
+        card = self._make_card()
+
+        trello = MagicMock()
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+
+        claude = MagicMock()
+        claude.run = AsyncMock(side_effect=RuntimeError("Claude Code failed: boom"))
+
+        await process_card_for_project(
+            card=card, project="testproject",
+            trello=trello, state=state, claude=claude, config=config,
+        )
+
+        assert card.id in _card_retry_state
+        assert _card_retry_state[card.id].error_count == 1
+        assert _card_retry_state[card.id].timeout_count == 0
+
+    @pytest.mark.asyncio
+    async def test_timeout_runtime_error_records_timeout(self, tmp_path):
+        """A RuntimeError whose message contains 'timed out after' must
+        increment timeout_count, not error_count."""
+        from trellm.state import StateManager
+        from trellm.__main__ import process_card_for_project, _card_retry_state
+
+        state = StateManager(str(tmp_path / "state.json"))
+        config = self._make_config()
+        card = self._make_card()
+
+        trello = MagicMock()
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+
+        claude = MagicMock()
+        claude.run = AsyncMock(
+            side_effect=RuntimeError("Claude Code timed out after 1200s")
+        )
+
+        await process_card_for_project(
+            card=card, project="testproject",
+            trello=trello, state=state, claude=claude, config=config,
+        )
+
+        assert _card_retry_state[card.id].timeout_count == 1
+        assert _card_retry_state[card.id].error_count == 0
+
+    @pytest.mark.asyncio
+    async def test_success_clears_retry_state(self, tmp_path):
+        """A successful run must clear the card's retry entry — the next
+        failure starts a fresh streak at 30s, not whatever the previous
+        streak was."""
+        from trellm.claude import ClaudeResult
+        from trellm.state import StateManager
+        from trellm.__main__ import (
+            process_card_for_project,
+            _card_retry_state,
+            CardRetryState,
+        )
+
+        state = StateManager(str(tmp_path / "state.json"))
+        config = self._make_config()
+        card = self._make_card()
+
+        # Pre-populate as if there had been failures
+        _card_retry_state[card.id] = CardRetryState(error_count=3, fast_failure_streak=3)
+
+        trello = MagicMock()
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+
+        claude = MagicMock()
+        claude.run = AsyncMock(
+            return_value=ClaudeResult(
+                success=True, session_id="sess-1", summary="", output="",
+            )
+        )
+
+        await process_card_for_project(
+            card=card, project="testproject",
+            trello=trello, state=state, claude=claude, config=config,
+        )
+
+        assert card.id not in _card_retry_state
+
+    @pytest.mark.asyncio
+    async def test_should_skip_card_for_backoff_returns_true_during_backoff(self):
+        """Helper used by the polling loop: True when the card is in
+        backoff and shouldn't be re-spawned this tick."""
+        import time as time_mod
+        from trellm.__main__ import (
+            CardRetryState,
+            _card_retry_state,
+            should_skip_card_for_backoff,
+        )
+
+        # Pre-seed a backoff that's still active
+        state = CardRetryState()
+        state.backoff_until = time_mod.time() + 60
+        _card_retry_state["card-busy"] = state
+
+        assert should_skip_card_for_backoff("card-busy") is True
+
+    @pytest.mark.asyncio
+    async def test_should_skip_card_for_backoff_returns_false_after_expiry(self):
+        """Once the backoff window expires, the polling loop should
+        re-spawn the card."""
+        import time as time_mod
+        from trellm.__main__ import (
+            CardRetryState,
+            _card_retry_state,
+            should_skip_card_for_backoff,
+        )
+
+        state = CardRetryState()
+        state.backoff_until = time_mod.time() - 1
+        _card_retry_state["card-expired"] = state
+
+        assert should_skip_card_for_backoff("card-expired") is False
+
+    @pytest.mark.asyncio
+    async def test_should_skip_card_for_backoff_returns_false_for_unknown_card(self):
+        """A card that has never failed has no entry — must not skip."""
+        from trellm.__main__ import should_skip_card_for_backoff
+        assert should_skip_card_for_backoff("never-seen") is False
+
+    @pytest.mark.asyncio
+    async def test_monthly_limit_does_not_record_retry_state(self, tmp_path):
+        """Org/monthly limit hits trigger the global pause — they shouldn't
+        ALSO record a per-card failure (would double-penalize the card)."""
+        from trellm.claude import MonthlyLimitError
+        from trellm.state import StateManager
+        from trellm.__main__ import process_card_for_project, _card_retry_state
+
+        state = StateManager(str(tmp_path / "state.json"))
+        config = self._make_config()
+        card = self._make_card()
+
+        trello = MagicMock()
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+
+        claude = MagicMock()
+        claude.run = AsyncMock(side_effect=MonthlyLimitError("hit limit"))
+
+        await process_card_for_project(
+            card=card, project="testproject",
+            trello=trello, state=state, claude=claude, config=config,
+        )
+
+        assert card.id not in _card_retry_state

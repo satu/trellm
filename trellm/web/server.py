@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -12,10 +13,26 @@ from aiohttp import web
 from ..claude import fetch_claude_usage_limits
 from ..config import Config
 from ..state import StateManager
+from ..trello import TrelloCard
 
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+def _seconds_since(iso_timestamp: Optional[str]) -> int:
+    """Return seconds elapsed since an ISO-8601 timestamp, or -1 on failure.
+
+    Accepts both 'Z' and explicit UTC offsets — Trello uses the 'Z' suffix.
+    """
+    if not iso_timestamp:
+        return -1
+    try:
+        parsed = datetime.fromisoformat(iso_timestamp.replace("Z", "+00:00"))
+        delta = datetime.now(timezone.utc) - parsed
+        return int(delta.total_seconds())
+    except (ValueError, TypeError):
+        return -1
 
 
 class WebServer:
@@ -28,12 +45,17 @@ class WebServer:
         running_tasks: set[asyncio.Task],
         processing_cards: set[str],
         start_time: float,
+        card_retry_state: Optional[dict] = None,
     ):
         self.config = config
         self.state = state
         self.running_tasks = running_tasks
         self.processing_cards = processing_cards
         self.start_time = start_time
+        # Per-card retry state from __main__.py; allows queue/task endpoints
+        # to surface error/timeout counts + backoff status. Defaults to an
+        # empty local dict so tests/standalone use don't crash on access.
+        self.card_retry_state: dict = card_retry_state if card_retry_state is not None else {}
         self._app: Optional[web.Application] = None
         self._runner: Optional[web.AppRunner] = None
         self._task_info: dict[str, dict] = {}  # task_id -> {project, card_name, card_url, started_at}
@@ -49,6 +71,9 @@ class WebServer:
         self._output_buffer_limit = 5000  # Max lines per task
         self._completed_tasks: list[dict] = []  # Last N completed tasks with output
         self._max_completed_tasks = 10
+        # Latest TODO snapshot pushed by the polling loop; powers /api/queue.
+        # Each entry: {card_id, card_name, card_url, last_activity}.
+        self._queue_snapshot: list[dict] = []
 
     def track_task(self, card_id: str, project: str, card_name: str, card_url: str) -> None:
         """Register a task for dashboard visibility."""
@@ -222,10 +247,25 @@ class WebServer:
         """Update config reference after hot reload."""
         self.config = config
 
+    def update_queue(self, cards: list[TrelloCard]) -> None:
+        """Replace the TODO snapshot. Called each poll cycle from the
+        polling loop. Stored as a list of plain dicts so the endpoint
+        handler doesn't need to know about TrelloCard."""
+        self._queue_snapshot = [
+            {
+                "card_id": c.id,
+                "card_name": c.name,
+                "card_url": c.url,
+                "last_activity": c.last_activity,
+            }
+            for c in cards
+        ]
+
     def _create_app(self) -> web.Application:
         app = web.Application(middlewares=[self._no_cache_static_middleware])
         app.router.add_get("/api/status", self._handle_status)
         app.router.add_get("/api/tasks", self._handle_tasks)
+        app.router.add_get("/api/queue", self._handle_queue)
         app.router.add_get("/api/projects", self._handle_projects)
         app.router.add_get("/api/stats", self._handle_stats)
         app.router.add_post("/api/abort", self._handle_abort)
@@ -298,6 +338,7 @@ class WebServer:
         now = time.time()
         tasks = []
         for card_id, info in self._task_info.items():
+            retry = self.card_retry_state.get(card_id)
             tasks.append({
                 "card_id": card_id,
                 "project": info["project"],
@@ -306,8 +347,53 @@ class WebServer:
                 "duration_seconds": int(now - info["started_at"]),
                 "has_output": card_id in self._task_output and len(self._task_output[card_id]) > 0,
                 "output_lines": len(self._task_output.get(card_id, [])),
+                "error_count": retry.error_count if retry else 0,
+                "timeout_count": retry.timeout_count if retry else 0,
+                "fast_failure_streak": retry.fast_failure_streak if retry else 0,
             })
         return web.json_response({"tasks": tasks})
+
+    async def _handle_queue(self, request: web.Request) -> web.Response:
+        """Return the latest TODO snapshot with project / retry / running
+        state merged in. Powers the dashboard's queue view.
+
+        Each entry has: card_id, card_name, card_url, project,
+        queued_for_seconds, is_running, and (optionally) retry counters
+        + backoff_remaining_seconds.
+        """
+        now = time.time()
+        items = []
+        for entry in self._queue_snapshot:
+            card_id = entry["card_id"]
+            card_name = entry["card_name"] or ""
+            # Project resolution mirrors __main__.parse_project so aliased
+            # cards group with their canonical project name.
+            parts = card_name.split()
+            parsed = parts[0].rstrip(":").lower() if parts else "unknown"
+            project = self.config.resolve_project(parsed) or parsed
+
+            queued_for = _seconds_since(entry.get("last_activity"))
+
+            retry = self.card_retry_state.get(card_id)
+            retry_info = None
+            if retry is not None:
+                retry_info = {
+                    "error_count": retry.error_count,
+                    "timeout_count": retry.timeout_count,
+                    "fast_failure_streak": retry.fast_failure_streak,
+                    "backoff_remaining_seconds": retry.seconds_until_resume(now=now),
+                }
+
+            items.append({
+                "card_id": card_id,
+                "card_name": card_name,
+                "card_url": entry["card_url"],
+                "project": project,
+                "queued_for_seconds": queued_for,
+                "is_running": card_id in self.processing_cards,
+                "retry": retry_info,
+            })
+        return web.json_response({"queue": items})
 
     async def _handle_projects(self, request: web.Request) -> web.Response:
         projects = []

@@ -123,6 +123,34 @@ td a:hover {
     text-align: center;
 }
 
+.retry-badge {
+    display: inline-block;
+    font-size: 0.75rem;
+    color: #f0883e;
+    background: rgba(240, 136, 62, 0.12);
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-variant-numeric: tabular-nums;
+}
+
+.queue-project {
+    font-size: 0.9rem;
+    color: #58a6ff;
+    margin: 12px 0 4px;
+}
+
+.queue-project:first-child { margin-top: 0; }
+
+.queue-count {
+    color: #8b949e;
+    font-size: 0.8rem;
+    font-weight: 400;
+}
+
+.queue-table td {
+    padding-left: 0;
+}
+
 .hidden { display: none; }
 
 .project-item {
