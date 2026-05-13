@@ -133,6 +133,27 @@ td a:hover {
     font-variant-numeric: tabular-nums;
 }
 
+.status-badge {
+    display: inline-block;
+    font-size: 0.7rem;
+    padding: 1px 8px;
+    border-radius: 10px;
+    margin-left: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    font-weight: 500;
+}
+
+.status-badge.status-timeout {
+    color: #f0883e;
+    background: rgba(240, 136, 62, 0.15);
+}
+
+.status-badge.status-error {
+    color: #f85149;
+    background: rgba(248, 81, 73, 0.15);
+}
+
 .queue-project {
     font-size: 0.9rem;
     color: #58a6ff;

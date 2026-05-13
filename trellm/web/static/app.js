@@ -271,6 +271,14 @@
             var link = t.card_url
                 ? '<a href="' + escapeHtml(t.card_url) + '" target="_blank">' + escapeHtml(t.card_name) + '</a>'
                 : escapeHtml(t.card_name);
+            // Timeouts and errors used to be hidden entirely from this
+            // list — now they're surfaced with a status badge so users
+            // can spot failed runs at a glance and click through to the
+            // logs (card pCHkDtyr).
+            var status = t.status || "success";
+            if (status !== "success") {
+                link += ' <span class="status-badge status-' + escapeHtml(status) + '">' + escapeHtml(status) + '</span>';
+            }
             var lineCount = t.output_lines ? ' (' + t.output_lines + ')' : '';
             var runId = t.run_id || t.card_id;
             var viewBtn = '<button class="btn-stream" data-action="view-completed"'

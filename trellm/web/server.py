@@ -86,18 +86,26 @@ class WebServer:
         self._task_output[card_id] = deque(maxlen=self._output_buffer_limit)
         self._task_output_subscribers[card_id] = []
 
-    def untrack_task(self, card_id: str, success: bool = True) -> None:
+    def untrack_task(self, card_id: str, status: str = "success") -> None:
         """Remove a completed/cancelled task from tracking.
 
-        When `success` is False, the task is dropped from "recent completions"
-        — failed/cancelled runs (e.g. org limit hits) shouldn't pollute the
-        list users browse for finished work. Live subscribers are still
-        notified so /api/stream connections close cleanly.
+        `status` is one of:
+          - "success" — normal completion (default)
+          - "timeout" — Claude ran but exceeded the wall-clock budget
+          - "error"   — Claude or the harness raised an exception
+          - "skipped" — no useful work happened (e.g. monthly-limit hit
+            before Claude produced output). Skipped runs are dropped
+            from Recent Completions so they don't pollute the list.
+
+        Timeouts and errors are kept because they produced log output
+        the user needs to investigate (card pCHkDtyr).
+
+        Live subscribers are always notified — regardless of status —
+        so /api/stream connections close cleanly.
         """
         info = self._task_info.pop(card_id, None)
         output = self._task_output.pop(card_id, None)
-        # Preserve only successful runs in completed tasks list
-        if success and info and output:
+        if status != "skipped" and info and output:
             completed_at = time.time()
             run_id = f"{card_id}_{int(completed_at)}"
             self._completed_tasks.insert(0, {
@@ -108,12 +116,11 @@ class WebServer:
                 "card_url": info["card_url"],
                 "started_at": info["started_at"],
                 "completed_at": completed_at,
+                "status": status,
                 "output": list(output),
             })
-            # Keep only last N
             if len(self._completed_tasks) > self._max_completed_tasks:
                 self._completed_tasks = self._completed_tasks[:self._max_completed_tasks]
-        # Signal subscribers that the task is done
         for queue in self._task_output_subscribers.pop(card_id, []):
             queue.put_nowait(None)
 
@@ -161,6 +168,7 @@ class WebServer:
                 "started_at": t["started_at"],
                 "completed_at": t["completed_at"],
                 "output_lines": len(t.get("output", [])),
+                "status": t.get("status", "success"),
             }
             for t in self._completed_tasks
         ]
@@ -608,6 +616,7 @@ class WebServer:
                 "duration_seconds": int(t["completed_at"] - t["started_at"]),
                 "completed_ago_seconds": int(now - t["completed_at"]),
                 "output_lines": len(t.get("output", [])),
+                "status": t.get("status", "success"),
                 "input_tokens": hist.get("input_tokens", 0),
                 "output_tokens": hist.get("output_tokens", 0),
             })

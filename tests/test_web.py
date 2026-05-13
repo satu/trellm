@@ -973,29 +973,75 @@ class TestWebServerCompletedTasks:
         output = web_server.get_output("card1")
         assert output == ["hello\n"]
 
-    def test_failed_task_not_in_completed_list(self, web_server):
-        """Tasks that finish with success=False (e.g. org-limit failures)
-        should NOT appear in the recent-completions list — that list was
-        getting flooded with the same card 30+ times when busy-looping
-        on org limit errors."""
+    def test_skipped_task_not_in_completed_list(self, web_server):
+        """status="skipped" (e.g. monthly-limit hits where Claude never
+        actually produced useful output) should NOT appear in
+        recent-completions — the list was getting flooded with the same
+        card 30+ times when busy-looping on org limit errors."""
         web_server.track_task("card1", "proj", "test", "http://example.com")
-        web_server.append_output("card1", "claude failed\n")
-        web_server.untrack_task("card1", success=False)
+        web_server.append_output("card1", "skipped\n")
+        web_server.untrack_task("card1", status="skipped")
         completed = web_server.get_completed_tasks()
         assert completed == []
 
-    def test_failed_task_signals_subscribers(self, web_server):
-        """Failed runs must still wake up SSE subscribers so the stream
-        endpoint can close the connection cleanly."""
+    def test_timed_out_task_appears_in_completed_list(self, web_server):
+        """Timeouts produced real log output before being killed — users
+        need that output visible in Recent Completions to investigate
+        why the run blew the wall clock. Regression fix for card pCHkDtyr."""
+        web_server.track_task("card1", "proj", "test", "http://example.com")
+        web_server.append_output("card1", "doing slow thing\n")
+        web_server.untrack_task("card1", status="timeout")
+        completed = web_server.get_completed_tasks()
+        assert len(completed) == 1
+        assert completed[0]["card_id"] == "card1"
+        assert completed[0]["status"] == "timeout"
+        assert completed[0]["output_lines"] == 1
+
+    def test_errored_task_appears_in_completed_list(self, web_server):
+        """Non-timeout errors with buffered output should also remain
+        visible — same reasoning as timeouts: the logs are the only way
+        to diagnose what went wrong."""
+        web_server.track_task("card1", "proj", "test", "http://example.com")
+        web_server.append_output("card1", "trello hiccup\n")
+        web_server.untrack_task("card1", status="error")
+        completed = web_server.get_completed_tasks()
+        assert len(completed) == 1
+        assert completed[0]["status"] == "error"
+
+    def test_success_status_is_default(self, web_server):
+        """Default status="success" — keeps existing call sites working
+        and tags clean completions as such for the dashboard."""
+        web_server.track_task("card1", "proj", "test", "http://example.com")
+        web_server.append_output("card1", "ok\n")
+        web_server.untrack_task("card1")
+        completed = web_server.get_completed_tasks()
+        assert completed[0]["status"] == "success"
+
+    def test_skipped_task_signals_subscribers(self, web_server):
+        """Skipped/failed runs must still wake up SSE subscribers so the
+        stream endpoint can close the connection cleanly."""
         web_server.track_task("card1", "proj", "test", "http://example.com")
         queue: asyncio.Queue = asyncio.Queue()
         web_server._task_output_subscribers["card1"].append(queue)
 
-        web_server.untrack_task("card1", success=False)
+        web_server.untrack_task("card1", status="skipped")
 
         # Subscriber should have received the None sentinel
         assert queue.qsize() == 1
         assert queue.get_nowait() is None
+
+    @pytest.mark.asyncio
+    async def test_completed_api_exposes_status(self, web_server):
+        """The /api/completed endpoint must surface the status field so
+        the dashboard can render timeout/error badges."""
+        web_server.track_task("card1", "proj", "test card", "http://example.com")
+        web_server.append_output("card1", "boom\n")
+        web_server.untrack_task("card1", status="timeout")
+        app = web_server._create_app()
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/completed")
+            data = await resp.json()
+            assert data["completed"][0]["status"] == "timeout"
 
     @pytest.mark.asyncio
     async def test_completed_tasks_api_endpoint(self, web_server):

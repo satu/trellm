@@ -1096,8 +1096,11 @@ async def process_card_for_project(
                         maint_result.summary[:100],
                     )
 
-        # Run Claude Code
-        succeeded = False
+        # Run Claude Code. Default status="skipped" means: if we bail
+        # before Claude does any real work (e.g. monthly-limit hit), the
+        # run is dropped from Recent Completions. Successful runs and
+        # legitimate failures (timeout/error) flip this below.
+        status = "skipped"
         run_started_at = time.time()
         try:
             # Set up output callback for web dashboard streaming
@@ -1148,7 +1151,7 @@ async def process_card_for_project(
             # starts a fresh streak at 30s.
             _card_retry_state.pop(card.id, None)
 
-            succeeded = True
+            status = "success"
             return card.id
 
         except MonthlyLimitError as e:
@@ -1173,6 +1176,9 @@ async def process_card_for_project(
             # 'timed out after' is how claude.py surfaces asyncio.TimeoutError
             # — categorize separately for dashboard visibility.
             is_timeout = "timed out after" in str(e).lower()
+            # Card pCHkDtyr: keep failed runs visible in Recent Completions
+            # so the user can read the logs that explain why they failed.
+            status = "timeout" if is_timeout else "error"
             retry_state = _card_retry_state.setdefault(card.id, CardRetryState())
             retry_state.record_failure(
                 duration_seconds=duration, is_timeout=is_timeout,
@@ -1206,7 +1212,7 @@ async def process_card_for_project(
             # Always remove from processing set when done
             _processing_cards.discard(card.id)
             if _web_server:
-                _web_server.untrack_task(card.id, success=succeeded)
+                _web_server.untrack_task(card.id, status=status)
 
 
 def _task_done_callback(task: asyncio.Task) -> None:
