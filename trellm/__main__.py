@@ -128,6 +128,36 @@ def should_skip_card_for_backoff(card_id: str, now: Optional[float] = None) -> b
     return state.is_in_backoff(now=now)
 
 
+def find_pending_sibling_for_project(
+    this_card_id: str,
+    project: str,
+    cards: list[TrelloCard],
+    card_projects: dict[str, Optional[str]],
+    now: Optional[float] = None,
+) -> Optional[str]:
+    """Return the id of another card for `project` that's currently in
+    flight or in active retry backoff. Otherwise None.
+
+    Why: when two or more cards for the same project are in TODO and one
+    fails/times out, the project lock would serialize sibling tasks but
+    the picker would already have spawned them both — so after the failed
+    card released the lock, the next sibling jumped in and clobbered the
+    session context the retry actually needed. By deferring siblings while
+    the just-failed card is in backoff (or its task is still alive), the
+    picker effectively "sticks with" that card across retries. Card 1jZZ6lOB.
+    """
+    for c in cards:
+        if c.id == this_card_id:
+            continue
+        if card_projects.get(c.id) != project:
+            continue
+        if c.id in _processing_cards:
+            return c.id
+        if should_skip_card_for_backoff(c.id, now=now):
+            return c.id
+    return None
+
+
 def is_globally_rate_limited() -> bool:
     """Return True if a global rate-limit pause is currently active."""
     return _rate_limit_pause_until > time.time()
@@ -1296,6 +1326,13 @@ async def run_polling_loop(
                     await asyncio.sleep(current_config.poll_interval)
                     continue
 
+                # Resolve each card's project once per poll cycle so the
+                # sibling check below is O(N) instead of O(N²).
+                card_projects: dict[str, Optional[str]] = {}
+                for c in cards:
+                    parsed = parse_project(c.name)
+                    card_projects[c.id] = current_config.resolve_project(parsed)
+
                 for card in cards:
                     # Skip if already being processed
                     if card.id in _processing_cards:
@@ -1396,6 +1433,24 @@ async def run_polling_loop(
                             retry.seconds_until_resume(),
                             retry.error_count, retry.timeout_count,
                             retry.fast_failure_streak,
+                        )
+                        continue
+
+                    # Defer to a sibling that's still in flight or in
+                    # backoff for the same project — avoids ping-ponging
+                    # between cards and the session-context churn that
+                    # caused (card 1jZZ6lOB).
+                    sticky = find_pending_sibling_for_project(
+                        this_card_id=card.id,
+                        project=project,
+                        cards=cards,
+                        card_projects=card_projects,
+                    )
+                    if sticky:
+                        logger.info(
+                            "[%s] Skipping card %s: sibling %s in flight or "
+                            "in backoff (continuing to retry sibling)",
+                            project, card.id, sticky,
                         )
                         continue
 

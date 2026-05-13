@@ -1658,3 +1658,156 @@ class TestProcessCardFailureRecording:
         )
 
         assert card.id not in _card_retry_state
+
+
+class TestFindPendingSiblingForProject:
+    """Tests for find_pending_sibling_for_project — the picker-side helper
+    that defers a card if a sibling for the same project is already in
+    flight or in active retry backoff.
+
+    Background (card 1jZZ6lOB): when cards A and B for the same project
+    are both in TODO and A times out, the project lock serializes them
+    but the original picker spawned tasks for both in the same poll
+    cycle. After A's task failed, B's queued task immediately picked
+    up the lock — ping-pong, wasting compaction tokens on session
+    context that the retry of A actually needed. The fix: refuse to
+    pick a sibling while the just-failed card is still in backoff (or
+    while its task is still alive)."""
+
+    def setup_method(self) -> None:
+        from trellm import __main__ as main_mod
+        main_mod._card_retry_state.clear()
+        main_mod._processing_cards.clear()
+
+    def _card(self, card_id: str, project: str = "testproject") -> TrelloCard:
+        return TrelloCard(
+            id=card_id,
+            name=f"{project} do thing",
+            description="",
+            url=f"https://trello.com/c/{card_id}",
+            last_activity="2026-01-24T10:00:00Z",
+        )
+
+    def test_no_siblings_returns_none(self):
+        from trellm.__main__ import find_pending_sibling_for_project
+        a = self._card("a")
+        result = find_pending_sibling_for_project(
+            this_card_id=a.id,
+            project="testproject",
+            cards=[a],
+            card_projects={a.id: "testproject"},
+        )
+        assert result is None
+
+    def test_sibling_for_different_project_returns_none(self):
+        """A card for project Y currently processing shouldn't block a
+        sibling-check for project X."""
+        from trellm.__main__ import find_pending_sibling_for_project
+        from trellm import __main__ as main_mod
+        a = self._card("a", project="alpha")
+        b = self._card("b", project="beta")
+        main_mod._processing_cards.add(b.id)
+        result = find_pending_sibling_for_project(
+            this_card_id=a.id,
+            project="alpha",
+            cards=[a, b],
+            card_projects={a.id: "alpha", b.id: "beta"},
+        )
+        assert result is None
+
+    def test_sibling_in_processing_returns_sibling_id(self):
+        """A different card for the same project, currently being
+        processed, must be returned — this is the 'in-flight' case."""
+        from trellm.__main__ import find_pending_sibling_for_project
+        from trellm import __main__ as main_mod
+        a = self._card("a")
+        b = self._card("b")
+        main_mod._processing_cards.add(a.id)
+        result = find_pending_sibling_for_project(
+            this_card_id=b.id,
+            project="testproject",
+            cards=[a, b],
+            card_projects={a.id: "testproject", b.id: "testproject"},
+        )
+        assert result == "a"
+
+    def test_sibling_in_backoff_returns_sibling_id(self):
+        """A sibling card in active backoff (recently failed, retry
+        pending) must block the picker — this is the 'sticky' case."""
+        import time as time_mod
+        from trellm.__main__ import (
+            CardRetryState,
+            _card_retry_state,
+            find_pending_sibling_for_project,
+        )
+        a = self._card("a")
+        b = self._card("b")
+        retry = CardRetryState()
+        retry.backoff_until = time_mod.time() + 60
+        _card_retry_state[a.id] = retry
+        result = find_pending_sibling_for_project(
+            this_card_id=b.id,
+            project="testproject",
+            cards=[a, b],
+            card_projects={a.id: "testproject", b.id: "testproject"},
+        )
+        assert result == "a"
+
+    def test_sibling_with_expired_backoff_does_not_block(self):
+        """Once a sibling's backoff window expires, it no longer blocks
+        — the picker can pick either card freely on the next cycle."""
+        import time as time_mod
+        from trellm.__main__ import (
+            CardRetryState,
+            _card_retry_state,
+            find_pending_sibling_for_project,
+        )
+        a = self._card("a")
+        b = self._card("b")
+        retry = CardRetryState()
+        retry.backoff_until = time_mod.time() - 1
+        _card_retry_state[a.id] = retry
+        result = find_pending_sibling_for_project(
+            this_card_id=b.id,
+            project="testproject",
+            cards=[a, b],
+            card_projects={a.id: "testproject", b.id: "testproject"},
+        )
+        assert result is None
+
+    def test_self_is_not_a_sibling(self):
+        """The card being checked must never be reported as its own
+        sibling, even if it's in processing/backoff itself."""
+        from trellm.__main__ import find_pending_sibling_for_project
+        from trellm import __main__ as main_mod
+        a = self._card("a")
+        main_mod._processing_cards.add(a.id)
+        result = find_pending_sibling_for_project(
+            this_card_id=a.id,
+            project="testproject",
+            cards=[a],
+            card_projects={a.id: "testproject"},
+        )
+        assert result is None
+
+    def test_returns_some_matching_sibling(self):
+        """When multiple siblings could block, return any of them — the
+        picker only needs to know *some* sibling is active."""
+        from trellm.__main__ import find_pending_sibling_for_project
+        from trellm import __main__ as main_mod
+        a = self._card("a")
+        b = self._card("b")
+        c = self._card("c")
+        main_mod._processing_cards.add(a.id)
+        main_mod._processing_cards.add(b.id)
+        result = find_pending_sibling_for_project(
+            this_card_id=c.id,
+            project="testproject",
+            cards=[a, b, c],
+            card_projects={
+                a.id: "testproject",
+                b.id: "testproject",
+                c.id: "testproject",
+            },
+        )
+        assert result in {"a", "b"}
