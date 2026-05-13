@@ -15,6 +15,7 @@ from trellm.claude import (
     PromptTooLongError,
     RateLimitError,
     SessionNotFoundError,
+    EXTRA_USAGE_PATTERN,
     MONTHLY_LIMIT_PATTERN,
     PROMPT_TOO_LONG_DETAILED_PATTERN,
     PROMPT_TOO_LONG_SIMPLE_PATTERN,
@@ -376,6 +377,35 @@ class TestErrorPatterns:
         ]:
             assert MONTHLY_LIMIT_PATTERN.search(msg) is None, f"Unexpectedly matched: {msg}"
 
+    def test_extra_usage_pattern_matches_observed_message(self):
+        """The 'out of extra usage' wording observed in production logs must
+        be detected. Without this, the polling loop spawns the same card
+        every poll cycle (388 spawns / 2 cards in card ZCwyx8wO before
+        the fix)."""
+        msg = "You're out of extra usage · resets 5:40am (UTC)"
+        assert EXTRA_USAGE_PATTERN.search(msg) is not None
+
+    def test_extra_usage_pattern_case_insensitive(self):
+        """Pattern must be case-insensitive — Anthropic's wording isn't pinned."""
+        for msg in [
+            "You're out of extra usage",
+            "you're OUT OF EXTRA usage",
+            "YOU'RE OUT OF EXTRA USAGE",
+            # Defensive: bare "out of usage" without "extra"
+            "you are out of usage today",
+        ]:
+            assert EXTRA_USAGE_PATTERN.search(msg) is not None, f"Failed for: {msg}"
+
+    def test_extra_usage_pattern_does_not_match_unrelated(self):
+        """Don't accidentally match session rate limits or success output."""
+        for msg in [
+            "You've hit your limit · resets 8pm (UTC)",
+            "rate_limit_error - resets in 30 minutes",
+            "You've hit your org's monthly usage limit",
+            '{"type":"result","result":"Task completed"}',
+        ]:
+            assert EXTRA_USAGE_PATTERN.search(msg) is None, f"Unexpectedly matched: {msg}"
+
 
 class TestClaudeRunnerErrorChecking:
     """Tests for ClaudeRunner error detection."""
@@ -509,6 +539,49 @@ class TestClaudeRunnerErrorChecking:
         """The org-monthly message contains 'hit your' too — make sure we
         raise MonthlyLimitError, not the generic RateLimitError."""
         stdout = '{"type":"result","result":"You\'ve hit your org\'s monthly usage limit"}'
+        try:
+            runner._check_for_errors("", stdout)
+        except MonthlyLimitError:
+            pass  # expected
+        except RateLimitError:
+            pytest.fail("Got RateLimitError; expected MonthlyLimitError")
+
+    def test_check_for_extra_usage_raises_monthly_limit(self, runner):
+        """'You're out of extra usage' is the message Claude Code emits when
+        OAuth credits are depleted. It must raise MonthlyLimitError so the
+        polling loop pauses globally — otherwise it busy-loops the same card
+        every 5s (388 spawns / 2 cards observed in card ZCwyx8wO)."""
+        stdout = (
+            '{"type":"result","result":"You\'re out of extra usage · '
+            'resets 5:40am (UTC)"}'
+        )
+        with pytest.raises(MonthlyLimitError):
+            runner._check_for_errors("", stdout)
+
+    def test_check_for_extra_usage_parses_reset_time(self, runner):
+        """The 'resets X:XXam (UTC)' suffix must be parsed into reset_seconds
+        so the global pause uses the actual reset window instead of the
+        1-hour fallback. Without this, we'd still retry hours before the
+        limit actually resets."""
+        stdout = (
+            '{"type":"result","result":"You\'re out of extra usage · '
+            'resets 5:40am (UTC)"}'
+        )
+        with pytest.raises(MonthlyLimitError) as exc_info:
+            runner._check_for_errors("", stdout)
+        # Reset time should be a positive number of seconds in the future
+        # (the clock-time parser handles "in the past → tomorrow" itself).
+        assert exc_info.value.reset_seconds is not None
+        assert exc_info.value.reset_seconds > 0
+
+    def test_extra_usage_is_not_rate_limit_subclass_behavior(self, runner):
+        """Like the org-monthly case, the in-process retry loop must NOT
+        catch the extra-usage failure as a RateLimitError, or it would sleep
+        and retry forever instead of letting the polling loop pause."""
+        stdout = (
+            '{"type":"result","result":"You\'re out of extra usage · '
+            'resets 5:40am (UTC)"}'
+        )
         try:
             runner._check_for_errors("", stdout)
         except MonthlyLimitError:

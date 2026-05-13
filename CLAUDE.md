@@ -121,7 +121,9 @@ Don't cache 429 errors — allow retry on next request. Use Claude Code's `User-
 
 7. **Stale session IDs** - Sessions can become invalid (e.g., after Claude Code updates). `claude.py` detects "session not found" errors via `SESSION_NOT_FOUND_PATTERN` and retries without the session ID.
 
-8. **Claude org/monthly limit pauses polling globally** - When Claude returns "you've hit your org's monthly usage limit", `claude.py` raises `MonthlyLimitError` (intentionally NOT a `RateLimitError` subclass, so the in-process retry loop doesn't swallow it). `__main__.py` then pauses the **global** polling loop via `is_globally_rate_limited()` for a default 1 hour — not per-card and not per-project, since org limits are org-wide. Cards stay in TODO; commands (`/abort`, `/restart`, etc.) still work. See commit `6f31e07` for the original incident (44 retries in production before the fix).
+8. **Claude monthly limit / extra-usage failures pause polling globally** - When Claude reports an account-wide usage limit, `claude.py` raises `MonthlyLimitError` (intentionally NOT a `RateLimitError` subclass, so the in-process retry loop doesn't swallow it). `__main__.py` then pauses the **global** polling loop via `is_globally_rate_limited()` — not per-card and not per-project, since these limits are account-wide. Cards stay in TODO; commands (`/abort`, `/restart`, etc.) still work. Two patterns currently trigger this:
+   - `MONTHLY_LIMIT_PATTERN` ("you've hit your org's monthly usage limit") — no parseable reset, defaults to 1h pause. Original incident: commit `6f31e07` (44 retries in production before the fix).
+   - `EXTRA_USAGE_PATTERN` ("you're out of extra usage · resets X:XXam (UTC)") — Claude Code's OAuth credit-depletion message; the reset clock-time is parsed via `_parse_rate_limit_reset_time`. Original incident: card `ZCwyx8wO` (388 retries across two smugcoin cards over ~7h before the fix). If you ever see a new wording for a usage-limit-style failure that isn't pausing the loop, add a pattern in `_check_for_errors` rather than tightening the polling loop — that's the single dispatch site.
 
 ## Testing
 

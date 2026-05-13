@@ -45,6 +45,15 @@ RATE_LIMIT_USER_PATTERN = re.compile(r"you've hit your limit", re.IGNORECASE)
 MONTHLY_LIMIT_PATTERN = re.compile(
     r"hit your\s+org'?s?\s+monthly\s+usage\s+limit", re.IGNORECASE
 )
+# Claude Code OAuth "extra usage" depletion (e.g.,
+# "You're out of extra usage · resets 5:40am (UTC)"). Distinct wording from
+# the org-monthly limit but semantically the same outage class — same Claude
+# account = same wallet, so a global pause is correct. We treat it as a
+# MonthlyLimitError so the polling-loop pause path is reused (see Gotcha #8
+# in CLAUDE.md). Without this, the polling loop spawns the same card every
+# poll cycle until the limit resets (388 spawns observed for two smugcoin
+# cards in card ZCwyx8wO before the fix).
+EXTRA_USAGE_PATTERN = re.compile(r"out\s+of\s+(?:extra\s+)?usage", re.IGNORECASE)
 # Reset time as duration (e.g., "resets in 2 hours", "resets in 30 minutes")
 RATE_LIMIT_RESET_DURATION_PATTERN = re.compile(r"resets?\s+(?:in\s+)?(\d+)\s*(hours?|minutes?|h|m|days?|d)", re.IGNORECASE)
 # Reset time as clock time (e.g., "resets 8pm (UTC)", "resets 10am")
@@ -476,6 +485,17 @@ class ClaudeRunner:
             reset_seconds = self._parse_rate_limit_reset_time(combined)
             raise MonthlyLimitError(
                 "Org/monthly usage limit exceeded",
+                reset_seconds=reset_seconds,
+            )
+
+        # Check for OAuth "extra usage" depletion — same global-pause semantics
+        # as the monthly limit (account-wide, lasts hours, not worth retrying
+        # per-card). Reuses MonthlyLimitError so __main__.py applies the same
+        # global pause; the reset clock-time in the message is parseable.
+        if EXTRA_USAGE_PATTERN.search(combined):
+            reset_seconds = self._parse_rate_limit_reset_time(combined)
+            raise MonthlyLimitError(
+                "Account usage limit exceeded (out of extra usage)",
                 reset_seconds=reset_seconds,
             )
 
