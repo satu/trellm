@@ -115,6 +115,36 @@ class CardRetryState:
         return max(0, int(self.backoff_until - now))
 
 
+def _build_retry_context_comment(
+    error: BaseException,
+    duration_seconds: float,
+    is_timeout: bool,
+) -> str:
+    """Build the Trello comment posted when a card is about to be retried.
+
+    Subsequent runs read card comments, so this is the channel for telling
+    the next Claude run "your previous run died like this — investigate
+    before re-running the same plan". Card 6U11EfUz.
+    """
+    if is_timeout:
+        minutes = max(1, round(duration_seconds / 60))
+        return (
+            "Claude: previous run was killed due to timeout after "
+            f"~{minutes} minute(s). The harness will retry this card, but "
+            "before re-running the same plan please investigate WHY it "
+            "timed out — e.g. an infinite loop in tests, a hung subprocess, "
+            "or work scope that doesn't fit the timeout window. Consider "
+            "reporting findings (or committing partial progress with a "
+            "summary) instead of repeating the same approach."
+        )
+    return (
+        f"Claude: previous run failed with error: {str(error)[:500]}. "
+        "The harness will retry this card. Before re-running the same "
+        "plan, investigate the root cause of the failure and consider "
+        "reporting findings instead of repeating the same approach."
+    )
+
+
 def should_skip_card_for_backoff(card_id: str, now: Optional[float] = None) -> bool:
     """Return True if this card is currently in a per-card backoff window.
 
@@ -1156,6 +1186,21 @@ async def process_card_for_project(
                 retry_state.seconds_until_resume(),
                 e,
             )
+            # Leave a retry-context comment so the next run knows what
+            # the previous run did and can investigate root cause rather
+            # than re-running the same plan. Best-effort: a Trello hiccup
+            # here must NOT prevent the backoff/retry state from being
+            # recorded above. Card 6U11EfUz.
+            try:
+                comment = _build_retry_context_comment(
+                    error=e, duration_seconds=duration, is_timeout=is_timeout,
+                )
+                await trello.add_comment(card.id, comment)
+            except Exception as comment_err:
+                logger.warning(
+                    "[%s] Failed to post retry-context comment on card %s: %s",
+                    project, card.id, comment_err,
+                )
             return None
         finally:
             # Always remove from processing set when done

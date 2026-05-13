@@ -1811,3 +1811,184 @@ class TestFindPendingSiblingForProject:
             },
         )
         assert result in {"a", "b"}
+
+
+class TestProcessCardFailurePostsRetryComment:
+    """When a card fails (timeout or generic error) and will be retried,
+    the harness must leave a "Claude:" comment on the card so the next
+    run has context — what happened on the previous run and a nudge to
+    investigate root cause rather than blindly re-running. Card 6U11EfUz.
+    """
+
+    def setup_method(self) -> None:
+        from trellm import __main__ as main_mod
+        main_mod._rate_limit_pause_until = 0.0
+        main_mod._card_retry_state.clear()
+        main_mod._processing_cards.clear()
+
+    def _make_config(self) -> Config:
+        return Config(
+            trello=TrelloConfig(
+                api_key="key", api_token="token", board_id="board",
+                todo_list_id="todo", ready_to_try_list_id="ready",
+            ),
+            claude=ClaudeConfig(
+                binary="claude", timeout=60,
+                projects={
+                    "testproject": ProjectConfig(working_dir="/tmp/testproject"),
+                },
+            ),
+        )
+
+    def _make_card(self) -> TrelloCard:
+        return TrelloCard(
+            id="card-retry-ctx-1",
+            name="testproject do thing",
+            description="",
+            url="https://trello.com/c/card-retry-ctx-1",
+            last_activity="2026-05-13T10:00:00Z",
+        )
+
+    @pytest.mark.asyncio
+    async def test_timeout_posts_retry_context_comment(self, tmp_path):
+        """When claude.py surfaces a timeout ('timed out after Ns'), the
+        harness must post a Claude:-prefixed comment that names the
+        timeout failure mode so the next run can adapt instead of just
+        re-running the same plan."""
+        from trellm.state import StateManager
+        from trellm.__main__ import process_card_for_project
+
+        state = StateManager(str(tmp_path / "state.json"))
+        config = self._make_config()
+        card = self._make_card()
+
+        trello = MagicMock()
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+
+        claude = MagicMock()
+        claude.run = AsyncMock(
+            side_effect=RuntimeError("Claude Code timed out after 1200s")
+        )
+
+        await process_card_for_project(
+            card=card, project="testproject",
+            trello=trello, state=state, claude=claude, config=config,
+        )
+
+        # add_comment must have been called at least once with the
+        # retry-context wording (a comment starting with "Claude:" that
+        # mentions timeout).
+        retry_comments = [
+            c for c in trello.add_comment.call_args_list
+            if "Claude:" in c.args[1] and "timeout" in c.args[1].lower()
+        ]
+        assert len(retry_comments) == 1, (
+            f"expected one timeout retry-context comment, got: "
+            f"{trello.add_comment.call_args_list}"
+        )
+        comment_text = retry_comments[0].args[1]
+        # The comment should mention 'retry' or 'investigate' so the
+        # next run knows not to just re-run the same plan.
+        lowered = comment_text.lower()
+        assert "retry" in lowered or "investigate" in lowered or "report" in lowered
+        # And it should be on the right card.
+        assert retry_comments[0].args[0] == card.id
+
+    @pytest.mark.asyncio
+    async def test_generic_error_posts_retry_context_comment(self, tmp_path):
+        """Same expectation for a non-timeout error: the harness should
+        surface what failed so the next run has context. The wording
+        differs from the timeout case (no 'killed after X minutes') but
+        it must still start with 'Claude:' and quote the error."""
+        from trellm.state import StateManager
+        from trellm.__main__ import process_card_for_project
+
+        state = StateManager(str(tmp_path / "state.json"))
+        config = self._make_config()
+        card = self._make_card()
+
+        trello = MagicMock()
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+
+        claude = MagicMock()
+        claude.run = AsyncMock(
+            side_effect=RuntimeError("Claude Code failed: subprocess crashed")
+        )
+
+        await process_card_for_project(
+            card=card, project="testproject",
+            trello=trello, state=state, claude=claude, config=config,
+        )
+
+        retry_comments = [
+            c for c in trello.add_comment.call_args_list
+            if c.args[1].startswith("Claude:") and "subprocess crashed" in c.args[1]
+        ]
+        assert len(retry_comments) == 1, (
+            f"expected one retry-context comment quoting the error, got: "
+            f"{trello.add_comment.call_args_list}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_monthly_limit_does_not_post_retry_context_comment(self, tmp_path):
+        """Account-wide usage limits aren't card-specific — posting a
+        'previous run failed' comment on every TODO card would be noise.
+        The MonthlyLimitError branch must NOT post a retry-context
+        comment."""
+        from trellm.claude import MonthlyLimitError
+        from trellm.state import StateManager
+        from trellm.__main__ import process_card_for_project
+
+        state = StateManager(str(tmp_path / "state.json"))
+        config = self._make_config()
+        card = self._make_card()
+
+        trello = MagicMock()
+        trello.add_comment = AsyncMock()
+        trello.move_to_ready = AsyncMock()
+
+        claude = MagicMock()
+        claude.run = AsyncMock(side_effect=MonthlyLimitError("hit limit"))
+
+        await process_card_for_project(
+            card=card, project="testproject",
+            trello=trello, state=state, claude=claude, config=config,
+        )
+
+        assert trello.add_comment.call_count == 0, (
+            f"MonthlyLimitError must not post a retry-context comment, "
+            f"got: {trello.add_comment.call_args_list}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_add_comment_failure_does_not_break_retry_state(self, tmp_path):
+        """If posting the retry-context comment itself fails (Trello
+        API hiccup), the failure must still be recorded in
+        _card_retry_state so the polling loop applies backoff. The
+        retry-context comment is best-effort — it must never be allowed
+        to crash the failure handler."""
+        from trellm.state import StateManager
+        from trellm.__main__ import process_card_for_project, _card_retry_state
+
+        state = StateManager(str(tmp_path / "state.json"))
+        config = self._make_config()
+        card = self._make_card()
+
+        trello = MagicMock()
+        # add_comment fails — but the handler must swallow it.
+        trello.add_comment = AsyncMock(side_effect=RuntimeError("trello 500"))
+        trello.move_to_ready = AsyncMock()
+
+        claude = MagicMock()
+        claude.run = AsyncMock(side_effect=RuntimeError("Claude Code failed: boom"))
+
+        # Must not propagate the add_comment error.
+        await process_card_for_project(
+            card=card, project="testproject",
+            trello=trello, state=state, claude=claude, config=config,
+        )
+
+        assert card.id in _card_retry_state
+        assert _card_retry_state[card.id].error_count == 1
