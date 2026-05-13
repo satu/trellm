@@ -865,6 +865,7 @@ class ClaudeRunner:
         output_callback: Optional[callable] = None,
         browser_enabled: bool = False,
         mcp_config_json: Optional[str] = None,
+        timeout: Optional[int] = None,
     ) -> ClaudeResult:
         """Run Claude Code as a subprocess with the given task.
 
@@ -889,6 +890,9 @@ class ClaudeRunner:
                 `--mcp-config <json>`. Off by default — feature is opt-in.
             mcp_config_json: JSON config string for `claude --mcp-config`.
                 Typically built by Config.patchright_mcp_config_json().
+            timeout: Optional per-call override of self.timeout (seconds).
+                Used by __main__.py to apply per-project timeouts via
+                Config.get_timeout(project). None falls back to self.timeout.
 
         Returns:
             ClaudeResult with success status, new session ID, and output
@@ -936,6 +940,7 @@ class ClaudeRunner:
                     output_callback=output_callback,
                     browser_enabled=browser_enabled,
                     mcp_config_json=mcp_config_json,
+                    timeout=timeout,
                 )
 
                 # Get cost info after successful execution
@@ -1066,6 +1071,7 @@ class ClaudeRunner:
         output_callback: Optional[callable] = None,
         browser_enabled: bool = False,
         mcp_config_json: Optional[str] = None,
+        timeout: Optional[int] = None,
     ) -> ClaudeResult:
         """Run Claude Code once without retry logic.
 
@@ -1080,6 +1086,9 @@ class ClaudeRunner:
                 `--mcp-config <json>` so claude loads the patchright MCP.
             mcp_config_json: JSON config blob (typically built by
                 Config.patchright_mcp_config_json()).
+            timeout: Optional per-call timeout override (seconds). None
+                falls back to self.timeout. Used by run() to thread
+                per-project timeouts through from Config.get_timeout.
 
         Returns:
             ClaudeResult with success status, new session ID, and output
@@ -1089,6 +1098,8 @@ class ClaudeRunner:
             RateLimitError: If rate limit is hit
             RuntimeError: For other errors
         """
+        effective_timeout = timeout if timeout is not None else self.timeout
+
         # Build the prompt
         prompt = self._build_prompt(card)
 
@@ -1184,7 +1195,7 @@ class ClaudeRunner:
                         read_stdout_stream(proc.stdout),  # type: ignore[arg-type]
                         read_stderr_stream(proc.stderr),  # type: ignore[arg-type]
                     ),
-                    timeout=self.timeout,
+                    timeout=effective_timeout,
                 )
                 await proc.wait()
                 output = "".join(stdout_lines)
@@ -1221,7 +1232,7 @@ class ClaudeRunner:
                         read_stdout_cb(proc.stdout),  # type: ignore[arg-type]
                         read_stderr_cb(proc.stderr),  # type: ignore[arg-type]
                     ),
-                    timeout=self.timeout,
+                    timeout=effective_timeout,
                 )
                 await proc.wait()
                 output = "".join(stdout_lines)
@@ -1230,14 +1241,14 @@ class ClaudeRunner:
                 # Quiet mode - just capture output
                 stdout, stderr = await asyncio.wait_for(
                     proc.communicate(),
-                    timeout=self.timeout,
+                    timeout=effective_timeout,
                 )
                 output = stdout.decode()
                 stderr_output = stderr.decode()
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
-            raise RuntimeError(f"Claude Code timed out after {self.timeout}s")
+            raise RuntimeError(f"Claude Code timed out after {effective_timeout}s")
 
         # Check for recoverable errors before checking return code
         # (errors may appear in stderr even with non-zero exit)

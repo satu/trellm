@@ -781,6 +781,10 @@ def compare_configs(old: Config, new: Config) -> list[str]:
             changes.append(
                 f"{proj}.aliases: {old_proj.aliases} → {new_proj.aliases}"
             )
+        if old_proj.timeout != new_proj.timeout:
+            changes.append(
+                f"{proj}.timeout: {old_proj.timeout} → {new_proj.timeout}"
+            )
 
     # Compare Trello config (only relevant fields)
     if old.trello.ready_to_try_list_id != new.trello.ready_to_try_list_id:
@@ -982,6 +986,7 @@ async def process_cards(
                 output_callback=output_cb,
                 browser_enabled=config.is_browser_enabled(project),
                 mcp_config_json=config.patchright_mcp_config_json(),
+                timeout=config.get_timeout(project),
             )
 
             # Update session ID and last card ID for next task
@@ -1118,6 +1123,7 @@ async def process_card_for_project(
                 output_callback=output_cb,
                 browser_enabled=config.is_browser_enabled(project),
                 mcp_config_json=config.patchright_mcp_config_json(),
+                timeout=config.get_timeout(project),
             )
 
             # Update session ID and last card ID for next task

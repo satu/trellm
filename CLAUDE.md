@@ -82,6 +82,10 @@ def get_maintenance_config(self, project: str) -> Optional[MaintenanceConfig]:
         return proj.maintenance  # Per-project takes priority
     return self.claude.maintenance  # Fall back to global
 ```
+The same shape applies to `Config.get_timeout(project)` — per-project
+`timeout` overrides the global `claude.timeout`. `__main__.py` resolves it
+per card and threads it into `claude.run(..., timeout=…)`. Add e.g.
+`smugcoin: { timeout: 1800 }` in `config.yaml` when 20 minutes isn't enough.
 
 ### Live Output Streaming
 `claude.py` supports an `output_callback` for streaming parsed stdout (text, thinking, tool results) to SSE clients. When set, it enables `--output-format stream-json` and forwards decoded output to the web dashboard:

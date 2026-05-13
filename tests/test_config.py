@@ -513,6 +513,35 @@ class TestConfigComparison:
         changes = compare_configs(config1, config2)
         assert any("proj1.compact_prompt" in c for c in changes)
 
+    def test_configs_equal_project_timeout_changed(self):
+        """Detect per-project timeout change so a config reload surfaces it."""
+        config1 = self._make_config(
+            claude=ClaudeConfig(
+                binary="claude",
+                timeout=600,
+                yolo=False,
+                projects={"proj1": ProjectConfig(
+                    working_dir="~/src/proj1",
+                    timeout=1200,
+                )},
+            )
+        )
+        config2 = self._make_config(
+            claude=ClaudeConfig(
+                binary="claude",
+                timeout=600,
+                yolo=False,
+                projects={"proj1": ProjectConfig(
+                    working_dir="~/src/proj1",
+                    timeout=1800,
+                )},
+            )
+        )
+
+        assert not configs_equal(config1, config2)
+        changes = compare_configs(config1, config2)
+        assert any("proj1.timeout" in c for c in changes)
+
     def test_configs_equal_aliases_changed(self):
         """Test detecting project aliases change."""
         config1 = self._make_config(
@@ -541,6 +570,75 @@ class TestConfigComparison:
         assert not configs_equal(config1, config2)
         changes = compare_configs(config1, config2)
         assert any("proj1.aliases" in c for c in changes)
+
+
+class TestGetTimeout:
+    """Tests for Config.get_timeout method.
+
+    Card VU9x903U: long-running projects (e.g. smugcoin) need a longer
+    per-card budget than the 20-minute global default. A per-project
+    override on ProjectConfig.timeout, surfaced via Config.get_timeout,
+    avoids forcing every other project onto the long timeout.
+    """
+
+    def _make_config(self, **proj_kwargs) -> Config:
+        return Config(
+            trello=TrelloConfig(
+                api_key="", api_token="", board_id="", todo_list_id="",
+            ),
+            claude=ClaudeConfig(
+                timeout=1200,
+                projects={
+                    "smugcoin": ProjectConfig(
+                        working_dir="~/src/smugcoin", **proj_kwargs,
+                    ),
+                    "other": ProjectConfig(working_dir="~/src/other"),
+                },
+            ),
+        )
+
+    def test_default_returns_global_timeout(self):
+        """Without a per-project override, return the global timeout."""
+        config = self._make_config()
+        assert config.get_timeout("smugcoin") == 1200
+        assert config.get_timeout("other") == 1200
+
+    def test_per_project_override_wins(self):
+        """A per-project timeout must override the global timeout."""
+        config = self._make_config(timeout=1800)
+        assert config.get_timeout("smugcoin") == 1800
+        # Other project still uses the global
+        assert config.get_timeout("other") == 1200
+
+    def test_unknown_project_falls_back_to_global(self):
+        """Unknown project names get the global timeout — defensive default
+        so a card whose project isn't configured doesn't blow up here."""
+        config = self._make_config(timeout=1800)
+        assert config.get_timeout("nonesuch") == 1200
+
+    def test_load_per_project_timeout_from_yaml(self, tmp_path):
+        """Per-project `timeout` parses from the yaml config."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.dump({
+                "claude": {
+                    "timeout": 1200,
+                    "projects": {
+                        "smugcoin": {
+                            "working_dir": "~/src/smugcoin",
+                            "timeout": 1800,
+                        },
+                        "other": {"working_dir": "~/src/other"},
+                    },
+                },
+            })
+        )
+
+        config = load_config(str(config_path))
+        assert config.claude.projects["smugcoin"].timeout == 1800
+        assert config.claude.projects["other"].timeout is None
+        assert config.get_timeout("smugcoin") == 1800
+        assert config.get_timeout("other") == 1200
 
 
 class TestParseProject:

@@ -63,6 +63,11 @@ class ProjectConfig:
     aliases: list[str] = field(default_factory=list)  # Short names that map to this project
     # Per-project override of the global browser setting. None = inherit global.
     browser: Optional[BrowserConfig] = None
+    # Per-project wall-clock budget (seconds) for a single claude run.
+    # None = inherit ClaudeConfig.timeout. See Config.get_timeout — long
+    # cards on heavy projects (e.g. smugcoin) need more than the global
+    # 20-min default without forcing every other project to wait that long.
+    timeout: Optional[int] = None
 
 
 @dataclass
@@ -135,6 +140,19 @@ class Config:
         for proj_config in self.claude.projects.values():
             names.update(proj_config.aliases)
         return names
+
+    def get_timeout(self, project: str) -> int:
+        """Effective wall-clock timeout for a single claude run on `project`.
+
+        Per-project ProjectConfig.timeout wins; otherwise the global
+        ClaudeConfig.timeout. Unknown projects also fall back to the
+        global so a misconfigured / freshly-added project doesn't crash
+        the caller.
+        """
+        proj = self.claude.projects.get(project)
+        if proj is not None and proj.timeout is not None:
+            return proj.timeout
+        return self.claude.timeout
 
     def get_maintenance_config(self, project: str) -> Optional[MaintenanceConfig]:
         """Get maintenance configuration for a project.
@@ -267,6 +285,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
             maintenance=maintenance,
             aliases=proj_data.get("aliases", []),
             browser=proj_browser,
+            timeout=proj_data.get("timeout"),
         )
 
     # Parse global maintenance config if present

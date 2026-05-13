@@ -2583,3 +2583,111 @@ class TestMcpConfigFlagPlumbing:
         assert len(captured_cmds) >= 2
         for cmd in captured_cmds:
             assert "--mcp-config" not in cmd
+
+
+class TestRunPerCallTimeout:
+    """Card VU9x903U: long-running projects (e.g. smugcoin) need a longer
+    per-card budget than the global default. `run()` accepts an explicit
+    `timeout` that overrides `self.timeout` for that single invocation, so
+    `__main__.py` can pass `config.get_timeout(project)` per card without
+    mutating the shared runner.
+    """
+
+    @pytest.fixture
+    def runner(self):
+        # Global timeout deliberately tiny so a leak (using self.timeout
+        # instead of the per-call override) would surface as the wrong
+        # value in the captured wait_for kwargs.
+        config = ClaudeConfig(binary="claude", timeout=60, yolo=False, projects={})
+        return ClaudeRunner(config)
+
+    @pytest.fixture
+    def mock_card(self):
+        return TrelloCard(
+            id="card123", name="test card", description="d",
+            url="https://trello.com/c/test",
+            last_activity="2026-01-01T00:00:00Z",
+        )
+
+    @pytest.mark.asyncio
+    async def test_run_once_uses_explicit_timeout_when_provided(self, runner, mock_card):
+        """`_run_once(timeout=N)` must hand N to asyncio.wait_for instead of self.timeout."""
+        captured_timeouts: list = []
+
+        async def capture_wait_for(coro, *, timeout):
+            captured_timeouts.append(timeout)
+            # Drain the coroutine and forward its result so the caller
+            # (which expects e.g. (stdout, stderr) from communicate()) is happy.
+            return await coro
+
+        async def fake_exec(*args, **kwargs):
+            mock_proc = AsyncMock()
+            mock_proc.returncode = 0
+            mock_proc.communicate.return_value = (
+                b'{"type":"result","result":"ok","session_id":"s1"}\n',
+                b"",
+            )
+            return mock_proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=fake_exec), \
+             patch("asyncio.wait_for", side_effect=capture_wait_for):
+            await runner._run_once(
+                card=mock_card, project="smugcoin", working_dir="/tmp/test",
+                session_id=None, prefix="[smugcoin] ",
+                timeout=1800,
+            )
+
+        assert 1800 in captured_timeouts
+        assert 60 not in captured_timeouts
+
+    @pytest.mark.asyncio
+    async def test_run_once_falls_back_to_self_timeout(self, runner, mock_card):
+        """`_run_once()` with no timeout argument must use self.timeout."""
+        captured_timeouts: list = []
+
+        async def capture_wait_for(coro, *, timeout):
+            captured_timeouts.append(timeout)
+            return await coro
+
+        async def fake_exec(*args, **kwargs):
+            mock_proc = AsyncMock()
+            mock_proc.returncode = 0
+            mock_proc.communicate.return_value = (
+                b'{"type":"result","result":"ok","session_id":"s1"}\n',
+                b"",
+            )
+            return mock_proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=fake_exec), \
+             patch("asyncio.wait_for", side_effect=capture_wait_for):
+            await runner._run_once(
+                card=mock_card, project="other", working_dir="/tmp/test",
+                session_id=None, prefix="[other] ",
+            )
+
+        assert 60 in captured_timeouts
+
+    @pytest.mark.asyncio
+    async def test_run_threads_timeout_to_run_once(self, runner, mock_card):
+        """Top-level `run(timeout=N)` must reach `_run_once` so the active
+        Claude task spawn (not the meta /compact spawn) uses N."""
+        captured = {}
+
+        async def fake_run_once(self_inner, *args, **kwargs):
+            captured["timeout"] = kwargs.get("timeout")
+            return ClaudeResult(success=True, session_id="s2", summary="ok", output="ok")
+
+        async def fake_cost(self_inner, *args, **kwargs):
+            return CostInfo()
+
+        with patch.object(ClaudeRunner, "_run_once", new=fake_run_once), \
+             patch.object(ClaudeRunner, "_run_cost", new=fake_cost):
+            await runner.run(
+                card=mock_card,
+                project="smugcoin",
+                session_id=None,
+                working_dir="/tmp/test",
+                timeout=1800,
+            )
+
+        assert captured["timeout"] == 1800
