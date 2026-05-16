@@ -31,7 +31,7 @@ TreLLM is a polling-based automation tool that bridges Trello boards with Claude
 - **`state.py`**: JSON-based state persistence for session IDs, ticket counts, and maintenance timestamps
 - **`maintenance.py`**: Periodic maintenance skill that runs every N tickets
 - **`web/server.py`**: Embedded aiohttp web dashboard with REST API, SSE streaming, usage caching, and task history
-- **`docs/`**: Long-form investigation and decision notes for cards that produce no code change (e.g. `prd-web-dashboard.md`, `patchright-mcp.md`). Future investigation cards should land their findings here.
+- **`docs/`**: Long-form investigation and decision notes for cards that produce no code change (e.g. `prd-web-dashboard.md`, `patchright-mcp.md`, `claude-interactive.md`). Future investigation cards should land their findings here.
 
 ## Key Patterns
 
