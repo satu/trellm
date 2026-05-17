@@ -13,6 +13,7 @@ from typing import Optional
 from .claude import ClaudeRunner, MonthlyLimitError, fetch_claude_usage_limits
 from .config import Config, load_config
 from .maintenance import run_maintenance, should_run_maintenance
+from .session import SessionManager
 from .state import StateManager
 from .trello import TrelloClient, TrelloCard
 from .web.server import WebServer
@@ -574,6 +575,7 @@ async def handle_maintenance_command(
             compact_prompt=config.get_compact_prompt(project),
             browser_enabled=config.is_browser_enabled(project),
             mcp_config_json=config.patchright_mcp_config_json(),
+            runner_mode=config.get_runner_mode(project),
         )
 
         if result.success:
@@ -751,6 +753,8 @@ def compare_configs(old: Config, new: Config) -> list[str]:
         changes.append(f"claude.timeout: {old.claude.timeout} → {new.claude.timeout}")
     if old.claude.yolo != new.claude.yolo:
         changes.append(f"claude.yolo: {old.claude.yolo} → {new.claude.yolo}")
+    if old.claude.runner != new.claude.runner:
+        changes.append(f"claude.runner: {old.claude.runner} → {new.claude.runner}")
 
     # Compare projects
     old_projects = set(old.claude.projects.keys())
@@ -785,6 +789,10 @@ def compare_configs(old: Config, new: Config) -> list[str]:
             changes.append(
                 f"{proj}.timeout: {old_proj.timeout} → {new_proj.timeout}"
             )
+        if old_proj.runner != new_proj.runner:
+            changes.append(
+                f"{proj}.runner: {old_proj.runner} → {new_proj.runner}"
+            )
 
     # Compare Trello config (only relevant fields)
     if old.trello.ready_to_try_list_id != new.trello.ready_to_try_list_id:
@@ -812,7 +820,7 @@ def configs_equal(old: Config, new: Config) -> bool:
 async def process_cards(
     trello: TrelloClient,
     state: StateManager,
-    claude: ClaudeRunner,
+    session_manager: SessionManager,
     config: Config,
 ) -> int:
     """Process all cards in TODO list.
@@ -950,6 +958,7 @@ async def process_cards(
                     compact_prompt=config.get_compact_prompt(project),
                     browser_enabled=config.is_browser_enabled(project),
                     mcp_config_json=config.patchright_mcp_config_json(),
+                    runner_mode=session_manager.get_runner_mode(project),
                 )
                 if maint_result.success:
                     state.set_last_maintenance(project)
@@ -969,29 +978,21 @@ async def process_cards(
                         maint_result.summary[:100],
                     )
 
-        # Run Claude Code
+        # Run Claude Code through the ClaudeSession seam — SessionManager
+        # resolves the transport (print/interactive) per project; PrintSession
+        # owns the session-id read/persist that this call site used to do.
         try:
             # Set up output callback for web dashboard streaming
             output_cb = None
             if _web_server:
                 output_cb = lambda line, cid=card.id: _web_server.append_output(cid, line)
 
-            result = await claude.run(
-                card=card,
-                project=project,
-                session_id=session_id,
-                working_dir=config.get_working_dir(project),
-                last_card_id=last_card_id,
-                compact_prompt=config.get_compact_prompt(project),
-                output_callback=output_cb,
-                browser_enabled=config.is_browser_enabled(project),
-                mcp_config_json=config.patchright_mcp_config_json(),
+            session = session_manager.session_for(project)
+            result = await session.run_task(
+                card,
                 timeout=config.get_timeout(project),
+                output_callback=output_cb,
             )
-
-            # Update session ID and last card ID for next task
-            if result.session_id:
-                state.set_session(project, result.session_id, last_card_id=card.id)
 
             # Record cost/usage statistics
             if result.cost_info:
@@ -1029,7 +1030,7 @@ async def process_card_for_project(
     project: str,
     trello: TrelloClient,
     state: StateManager,
-    claude: ClaudeRunner,
+    session_manager: SessionManager,
     config: Config,
 ) -> Optional[str]:
     """Process a single card for a project, with per-project locking.
@@ -1082,6 +1083,7 @@ async def process_card_for_project(
                     compact_prompt=config.get_compact_prompt(project),
                     browser_enabled=config.is_browser_enabled(project),
                     mcp_config_json=config.patchright_mcp_config_json(),
+                    runner_mode=session_manager.get_runner_mode(project),
                 )
                 if maint_result.success:
                     state.set_last_maintenance(project)
@@ -1101,10 +1103,11 @@ async def process_card_for_project(
                         maint_result.summary[:100],
                     )
 
-        # Run Claude Code. Default status="skipped" means: if we bail
-        # before Claude does any real work (e.g. monthly-limit hit), the
-        # run is dropped from Recent Completions. Successful runs and
-        # legitimate failures (timeout/error) flip this below.
+        # Run Claude Code through the ClaudeSession seam. Default
+        # status="skipped" means: if we bail before Claude does any real
+        # work (e.g. monthly-limit hit), the run is dropped from Recent
+        # Completions. Successful runs and legitimate failures
+        # (timeout/error) flip this below.
         status = "skipped"
         run_started_at = time.time()
         try:
@@ -1113,22 +1116,15 @@ async def process_card_for_project(
             if _web_server:
                 output_cb = lambda line, cid=card.id: _web_server.append_output(cid, line)
 
-            result = await claude.run(
-                card=card,
-                project=project,
-                session_id=session_id,
-                working_dir=config.get_working_dir(project),
-                last_card_id=last_card_id,
-                compact_prompt=config.get_compact_prompt(project),
-                output_callback=output_cb,
-                browser_enabled=config.is_browser_enabled(project),
-                mcp_config_json=config.patchright_mcp_config_json(),
+            # SessionManager resolves the transport (print/interactive) per
+            # project; PrintSession owns the session-id read/persist that
+            # this call site used to do inline.
+            session = session_manager.session_for(project)
+            result = await session.run_task(
+                card,
                 timeout=config.get_timeout(project),
+                output_callback=output_cb,
             )
-
-            # Update session ID and last card ID for next task
-            if result.session_id:
-                state.set_session(project, result.session_id, last_card_id=card.id)
 
             # Record cost/usage statistics
             if result.cost_info:
@@ -1256,6 +1252,7 @@ async def run_polling_loop(
         verbose=verbose,
         ready_list_id=config.trello.ready_to_try_list_id,
     )
+    session_manager = SessionManager(config=config, runner=claude, state=state)
 
     # Track current config and last processed card for reload notifications
     current_config = config
@@ -1314,6 +1311,9 @@ async def run_polling_loop(
                         new_config.claude,
                         verbose=verbose,
                         ready_list_id=new_config.trello.ready_to_try_list_id,
+                    )
+                    session_manager = SessionManager(
+                        config=new_config, runner=claude, state=state,
                     )
 
                     # Add comment to last processed card about config reload
@@ -1521,7 +1521,7 @@ async def run_polling_loop(
                             project=project,
                             trello=trello,
                             state=state,
-                            claude=claude,
+                            session_manager=session_manager,
                             config=current_config,
                         )
                     )
@@ -1549,6 +1549,7 @@ async def run_polling_loop(
             task.cancel()
         if _running_tasks:
             await asyncio.gather(*_running_tasks, return_exceptions=True)
+        await session_manager.shutdown()
         if _web_server:
             await _web_server.stop()
             _web_server = None
@@ -1564,10 +1565,12 @@ async def run_once(config: Config, verbose: bool = False) -> int:
         verbose=verbose,
         ready_list_id=config.trello.ready_to_try_list_id,
     )
+    session_manager = SessionManager(config=config, runner=claude, state=state)
 
     try:
-        return await process_cards(trello, state, claude, config)
+        return await process_cards(trello, state, session_manager, config)
     finally:
+        await session_manager.shutdown()
         await trello.close()
 
 

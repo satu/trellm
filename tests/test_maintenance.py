@@ -248,6 +248,30 @@ class TestRunMaintenance:
         assert result.session_id == "maint-session-123"
 
     @pytest.mark.asyncio
+    async def test_run_maintenance_interactive_runner_is_not_supported(self, tmp_path):
+        """Maintenance runs `claude -p` directly (print transport). An
+        interactive project's maintenance turn would need to be typed into
+        its live TUI window — that wiring is M4 (docs/claude-interactive.md
+        §9). Until then run_maintenance must report 'not supported' for a
+        non-print runner instead of silently spawning a metered subprocess."""
+        with patch("asyncio.create_subprocess_exec") as mock_exec:
+            result = await run_maintenance(
+                project="testproject",
+                working_dir=str(tmp_path),
+                session_id=None,
+                claude_config=ClaudeConfig(binary="claude", timeout=60),
+                maintenance_config=MaintenanceConfig(enabled=True, interval=10),
+                ticket_count=10,
+                last_maintenance=None,
+                runner_mode="interactive",
+            )
+
+        assert result.success is False
+        assert "interactive" in result.summary.lower()
+        # No subprocess was spawned.
+        mock_exec.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_run_maintenance_failure(self, tmp_path):
         """Test maintenance run that fails."""
         mock_proc = AsyncMock()

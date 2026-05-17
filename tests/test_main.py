@@ -25,6 +25,7 @@ from trellm.config import (
     MaintenanceConfig,
 )
 from trellm.maintenance import MaintenanceResult
+from trellm.session import SessionManager
 from trellm.trello import TrelloCard
 
 
@@ -1313,7 +1314,7 @@ class TestProcessCardForProjectMonthlyLimit:
             project="testproject",
             trello=trello,
             state=state,
-            claude=claude,
+            session_manager=SessionManager(config=config, runner=claude, state=state),
             config=config,
         )
 
@@ -1352,7 +1353,7 @@ class TestProcessCardForProjectMonthlyLimit:
             project="testproject",
             trello=trello,
             state=state,
-            claude=claude,
+            session_manager=SessionManager(config=config, runner=claude, state=state),
             config=config,
         )
 
@@ -1519,7 +1520,9 @@ class TestProcessCardFailureRecording:
 
         await process_card_for_project(
             card=card, project="testproject",
-            trello=trello, state=state, claude=claude, config=config,
+            trello=trello, state=state,
+            session_manager=SessionManager(config=config, runner=claude, state=state),
+            config=config,
         )
 
         assert card.id in _card_retry_state
@@ -1548,7 +1551,9 @@ class TestProcessCardFailureRecording:
 
         await process_card_for_project(
             card=card, project="testproject",
-            trello=trello, state=state, claude=claude, config=config,
+            trello=trello, state=state,
+            session_manager=SessionManager(config=config, runner=claude, state=state),
+            config=config,
         )
 
         assert _card_retry_state[card.id].timeout_count == 1
@@ -1587,7 +1592,9 @@ class TestProcessCardFailureRecording:
 
         await process_card_for_project(
             card=card, project="testproject",
-            trello=trello, state=state, claude=claude, config=config,
+            trello=trello, state=state,
+            session_manager=SessionManager(config=config, runner=claude, state=state),
+            config=config,
         )
 
         assert card.id not in _card_retry_state
@@ -1654,7 +1661,9 @@ class TestProcessCardFailureRecording:
 
         await process_card_for_project(
             card=card, project="testproject",
-            trello=trello, state=state, claude=claude, config=config,
+            trello=trello, state=state,
+            session_manager=SessionManager(config=config, runner=claude, state=state),
+            config=config,
         )
 
         assert card.id not in _card_retry_state
@@ -1873,7 +1882,9 @@ class TestProcessCardFailurePostsRetryComment:
 
         await process_card_for_project(
             card=card, project="testproject",
-            trello=trello, state=state, claude=claude, config=config,
+            trello=trello, state=state,
+            session_manager=SessionManager(config=config, runner=claude, state=state),
+            config=config,
         )
 
         # add_comment must have been called at least once with the
@@ -1919,7 +1930,9 @@ class TestProcessCardFailurePostsRetryComment:
 
         await process_card_for_project(
             card=card, project="testproject",
-            trello=trello, state=state, claude=claude, config=config,
+            trello=trello, state=state,
+            session_manager=SessionManager(config=config, runner=claude, state=state),
+            config=config,
         )
 
         retry_comments = [
@@ -1954,7 +1967,9 @@ class TestProcessCardFailurePostsRetryComment:
 
         await process_card_for_project(
             card=card, project="testproject",
-            trello=trello, state=state, claude=claude, config=config,
+            trello=trello, state=state,
+            session_manager=SessionManager(config=config, runner=claude, state=state),
+            config=config,
         )
 
         assert trello.add_comment.call_count == 0, (
@@ -1987,7 +2002,9 @@ class TestProcessCardFailurePostsRetryComment:
         # Must not propagate the add_comment error.
         await process_card_for_project(
             card=card, project="testproject",
-            trello=trello, state=state, claude=claude, config=config,
+            trello=trello, state=state,
+            session_manager=SessionManager(config=config, runner=claude, state=state),
+            config=config,
         )
 
         assert card.id in _card_retry_state

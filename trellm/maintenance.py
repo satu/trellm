@@ -219,6 +219,7 @@ async def run_maintenance(
     compact_prompt: Optional[str] = None,
     browser_enabled: bool = False,
     mcp_config_json: Optional[str] = None,
+    runner_mode: str = "print",
 ) -> MaintenanceResult:
     """Run the maintenance skill for a project.
 
@@ -236,16 +237,41 @@ async def run_maintenance(
         trello_client: Optional Trello client for creating maintenance cards
         icebox_list_id: Optional ICE BOX list ID for maintenance cards
         compact_prompt: Optional custom instructions for /compact
+        runner_mode: The `claude` transport for this project, resolved via
+            SessionManager.get_runner_mode. Only "print" has a maintenance
+            backend today; interactive maintenance is M4 (see
+            docs/claude-interactive.md §9).
 
     Returns:
         MaintenanceResult with success status and summary
     """
     prefix = f"[{project}] "
+
+    # Maintenance runs `claude -p` directly (print transport). An interactive
+    # project would need its maintenance turn typed into the live TUI window —
+    # that wiring is M4. Until then, don't silently fall back to a metered
+    # subprocess for an interactive project; report it instead.
+    if runner_mode != "print":
+        logger.warning(
+            "%sMaintenance skipped: runner mode %r has no maintenance backend "
+            "yet (interactive maintenance lands in M4)",
+            prefix,
+            runner_mode,
+        )
+        return MaintenanceResult(
+            success=False,
+            summary=(
+                f"Maintenance not supported for runner mode '{runner_mode}' yet "
+                "(interactive maintenance lands in M4)."
+            ),
+        )
+
     logger.info(
-        "%sRunning maintenance (ticket_count=%d, interval=%d)",
+        "%sRunning maintenance (ticket_count=%d, interval=%d, runner=%s)",
         prefix,
         ticket_count,
         maintenance_config.interval,
+        runner_mode,
     )
 
     # Run /compact first if we have an existing session

@@ -68,6 +68,11 @@ class ProjectConfig:
     # cards on heavy projects (e.g. smugcoin) need more than the global
     # 20-min default without forcing every other project to wait that long.
     timeout: Optional[int] = None
+    # Per-project `claude` transport: "print" (one subprocess per card) or
+    # "interactive" (a long-lived TUI session). None = inherit
+    # ClaudeConfig.runner. See Config.get_runner_mode and
+    # docs/claude-interactive.md.
+    runner: Optional[str] = None
 
 
 @dataclass
@@ -77,6 +82,10 @@ class ClaudeConfig:
     binary: str = "claude"
     timeout: int = 1200  # 20 minutes default
     yolo: bool = False  # Run with --dangerously-skip-permissions
+    # Global `claude` transport for projects with no per-project override:
+    # "print" (today's one-subprocess-per-card model) or "interactive".
+    # See Config.get_runner_mode and docs/claude-interactive.md.
+    runner: str = "print"
     projects: dict[str, ProjectConfig] = field(default_factory=dict)
     # Global maintenance settings (applies to all projects unless overridden)
     maintenance: Optional[MaintenanceConfig] = None
@@ -153,6 +162,19 @@ class Config:
         if proj is not None and proj.timeout is not None:
             return proj.timeout
         return self.claude.timeout
+
+    def get_runner_mode(self, project: str) -> str:
+        """`claude` transport for `project`: 'print' (default) or 'interactive'.
+
+        Per-project ProjectConfig.runner wins; otherwise the global
+        ClaudeConfig.runner. Unknown / unconfigured projects fall back to
+        the global default so a freshly-added project doesn't crash the
+        caller — mirrors get_timeout. See docs/claude-interactive.md.
+        """
+        proj = self.claude.projects.get(project)
+        if proj is not None and proj.runner is not None:
+            return proj.runner
+        return self.claude.runner or "print"
 
     def get_maintenance_config(self, project: str) -> Optional[MaintenanceConfig]:
         """Get maintenance configuration for a project.
@@ -286,6 +308,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
             aliases=proj_data.get("aliases", []),
             browser=proj_browser,
             timeout=proj_data.get("timeout"),
+            runner=proj_data.get("runner"),
         )
 
     # Parse global maintenance config if present
@@ -311,6 +334,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
         binary=claude_data.get("binary", "claude"),
         timeout=claude_data.get("timeout", 1200),
         yolo=claude_data.get("yolo", False),
+        runner=claude_data.get("runner", "print"),
         projects=projects,
         maintenance=global_maintenance,
         browser=global_browser,

@@ -571,6 +571,146 @@ class TestConfigComparison:
         changes = compare_configs(config1, config2)
         assert any("proj1.aliases" in c for c in changes)
 
+    def test_configs_equal_global_runner_changed(self):
+        """Detect a global claude.runner change so a config reload surfaces
+        a project being switched between print and interactive transports."""
+        config1 = self._make_config(
+            claude=ClaudeConfig(
+                binary="claude", timeout=600, yolo=False, runner="print",
+                projects={"proj1": ProjectConfig(working_dir="~/src/proj1")},
+            )
+        )
+        config2 = self._make_config(
+            claude=ClaudeConfig(
+                binary="claude", timeout=600, yolo=False, runner="interactive",
+                projects={"proj1": ProjectConfig(working_dir="~/src/proj1")},
+            )
+        )
+
+        assert not configs_equal(config1, config2)
+        changes = compare_configs(config1, config2)
+        assert any("claude.runner" in c for c in changes)
+
+    def test_configs_equal_project_runner_changed(self):
+        """Detect a per-project runner change, mirroring the per-project
+        timeout comparison."""
+        config1 = self._make_config(
+            claude=ClaudeConfig(
+                binary="claude", timeout=600, yolo=False,
+                projects={"proj1": ProjectConfig(
+                    working_dir="~/src/proj1", runner="print",
+                )},
+            )
+        )
+        config2 = self._make_config(
+            claude=ClaudeConfig(
+                binary="claude", timeout=600, yolo=False,
+                projects={"proj1": ProjectConfig(
+                    working_dir="~/src/proj1", runner="interactive",
+                )},
+            )
+        )
+
+        assert not configs_equal(config1, config2)
+        changes = compare_configs(config1, config2)
+        assert any("proj1.runner" in c for c in changes)
+
+
+class TestGetRunnerMode:
+    """Tests for Config.get_runner_mode.
+
+    docs/claude-interactive.md M1: a per-project `runner` selects the
+    `claude` transport (`print` — today's one-subprocess-per-card model —
+    or `interactive`). Per-project beats global; the default is `print`,
+    so the seam lands with zero behaviour change.
+    """
+
+    def _make_config(self, *, global_runner=None, **proj_kwargs) -> Config:
+        claude_kwargs = dict(
+            timeout=1200,
+            projects={
+                "smugcoin": ProjectConfig(
+                    working_dir="~/src/smugcoin", **proj_kwargs,
+                ),
+                "other": ProjectConfig(working_dir="~/src/other"),
+            },
+        )
+        if global_runner is not None:
+            claude_kwargs["runner"] = global_runner
+        return Config(
+            trello=TrelloConfig(
+                api_key="", api_token="", board_id="", todo_list_id="",
+            ),
+            claude=ClaudeConfig(**claude_kwargs),
+        )
+
+    def test_default_is_print(self):
+        """With no override anywhere, every project runs in print mode."""
+        config = self._make_config()
+        assert config.get_runner_mode("smugcoin") == "print"
+        assert config.get_runner_mode("other") == "print"
+
+    def test_global_runner_applies_to_all_projects(self):
+        """A global claude.runner applies to projects with no override."""
+        config = self._make_config(global_runner="interactive")
+        assert config.get_runner_mode("smugcoin") == "interactive"
+        assert config.get_runner_mode("other") == "interactive"
+
+    def test_per_project_runner_beats_global(self):
+        """A per-project runner overrides the global setting."""
+        config = self._make_config(global_runner="interactive", runner="print")
+        assert config.get_runner_mode("smugcoin") == "print"
+        # The project without an override still follows the global.
+        assert config.get_runner_mode("other") == "interactive"
+
+    def test_unknown_project_falls_back_to_global_default(self):
+        """An unconfigured project name resolves to the global runner
+        (default print) instead of crashing."""
+        config = self._make_config()
+        assert config.get_runner_mode("nonesuch") == "print"
+
+    def test_load_runner_from_yaml(self, tmp_path):
+        """Global and per-project `runner` parse from the yaml config."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.dump({
+                "claude": {
+                    "runner": "print",
+                    "projects": {
+                        "itest": {
+                            "working_dir": "~/src/itest",
+                            "runner": "interactive",
+                        },
+                        "other": {"working_dir": "~/src/other"},
+                    },
+                },
+            })
+        )
+
+        config = load_config(str(config_path))
+        assert config.claude.runner == "print"
+        assert config.claude.projects["itest"].runner == "interactive"
+        assert config.claude.projects["other"].runner is None
+        assert config.get_runner_mode("itest") == "interactive"
+        assert config.get_runner_mode("other") == "print"
+
+    def test_default_runner_when_absent_from_yaml(self, tmp_path):
+        """A config that never mentions `runner` defaults the global to
+        print and leaves per-project overrides unset."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.dump({
+                "claude": {
+                    "projects": {"other": {"working_dir": "~/src/other"}},
+                },
+            })
+        )
+
+        config = load_config(str(config_path))
+        assert config.claude.runner == "print"
+        assert config.claude.projects["other"].runner is None
+        assert config.get_runner_mode("other") == "print"
+
 
 class TestGetTimeout:
     """Tests for Config.get_timeout method.
