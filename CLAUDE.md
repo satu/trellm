@@ -154,6 +154,7 @@ Tests mirror the source structure in `tests/`:
 - `test_start_script.py` - `start-trellm.sh` startup script tests
 - `test_start_trellm.py` - Browser-stack auto-start path (`scripts/needs-browser-stack.py` + `start-trellm.sh`)
 - `test_state.py` - State persistence tests
+- `test_tmux.py` - `tmux` control module (`TmuxController`) — mocked-`tmux` unit tests + a real-`tmux` integration test
 - `test_web.py` - Web dashboard API, SSE streaming, usage caching tests
 
 `test_claude_md.py` keeps this list honest — adding a `tests/test_*.py` file without listing it here, or listing one that no longer exists, fails the suite.
