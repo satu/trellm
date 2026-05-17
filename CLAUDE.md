@@ -31,7 +31,7 @@ TreLLM is a polling-based automation tool that bridges Trello boards with Claude
 - **`state.py`**: JSON-based state persistence for session IDs, ticket counts, and maintenance timestamps
 - **`maintenance.py`**: Periodic maintenance skill that runs every N tickets
 - **`web/server.py`**: Embedded aiohttp web dashboard with REST API, SSE streaming, usage caching, and task history
-- **`docs/`**: Long-form investigation and decision notes for cards that produce no code change (e.g. `prd-web-dashboard.md`, `patchright-mcp.md`, `claude-interactive.md`). Future investigation cards should land their findings here.
+- **`docs/`**: Long-form investigation and decision notes for cards that produce no code change (e.g. `prd-web-dashboard.md`, `patchright-mcp.md`, `claude-interactive.md`, `dashboard-ux-handoff.md`). Future investigation cards should land their findings here.
 
 ## Key Patterns
 
@@ -129,15 +129,23 @@ Don't cache 429 errors — allow retry on next request. Use Claude Code's `User-
    - `MONTHLY_LIMIT_PATTERN` ("you've hit your org's monthly usage limit") — no parseable reset, defaults to 1h pause. Original incident: commit `6f31e07` (44 retries in production before the fix).
    - `EXTRA_USAGE_PATTERN` ("you're out of extra usage · resets X:XXam (UTC)") — Claude Code's OAuth credit-depletion message; the reset clock-time is parsed via `_parse_rate_limit_reset_time`. Original incident: card `ZCwyx8wO` (388 retries across two smugcoin cards over ~7h before the fix). If you ever see a new wording for a usage-limit-style failure that isn't pausing the loop, add a pattern in `_check_for_errors` rather than tightening the polling loop — that's the single dispatch site.
 
+9. **Per-card retry backoff** - Gotcha #8 covers account-wide usage limits, but other failures (timeouts, generic `RuntimeError`s) would still busy-loop the same card every poll cycle. `__main__.py` keeps a `CardRetryState` per card id in `_card_retry_state`. A failure that exits within `FAST_FAILURE_THRESHOLD_SECONDS` (60s) counts as a *fast failure* and pushes the card into an **exponential per-card backoff** window — `BASE_BACKOFF_SECONDS` (30s) doubling on each consecutive fast failure, capped at `MAX_BACKOFF_SECONDS` (30 min): 30, 60, 120, ... 1800. A slow failure (≥60s — it did real work, not a busy-loop) resets the streak. The picker skips a card via `should_skip_card_for_backoff()` while it is in backoff, and a *success* clears the card's state entirely (`_card_retry_state.pop`). Two companion behaviors: (a) `find_pending_sibling_for_project()` defers other TODO cards for the same project while a just-failed sibling is mid-retry, so the picker "sticks with" the failing card instead of clobbering its session context; (b) on each failure a retry-context comment (`_build_retry_context_comment`) is posted to the card so the next run knows the previous one died — and whether by timeout or by error. This is per-card and per-failure-mode, distinct from the global pause in #8.
+
 ## Testing
 
 Tests mirror the source structure in `tests/`:
+- `test_browser_scripts.py` - Static-structure checks on the browser-stack shell scripts (Xvfb + Chrome + x11vnc + noVNC)
 - `test_claude.py` - Claude subprocess integration tests
+- `test_claude_md.py` - Structural checks pinning load-bearing CLAUDE.md content
 - `test_config.py` - Configuration loading tests
-- `test_main.py` - Command handlers (abort, restart, reset-session) and polling loop tests
+- `test_icon_utils.py` - `icon_utils` image-processing helper tests
+- `test_main.py` - Command handlers (abort, restart, reset-session), polling loop, and per-card retry/backoff tests
 - `test_maintenance.py` - Maintenance skill tests
+- `test_start_script.py` - `start-trellm.sh` startup script tests
+- `test_start_trellm.py` - Browser-stack auto-start path (`scripts/needs-browser-stack.py` + `start-trellm.sh`)
 - `test_state.py` - State persistence tests
-- `test_trello.py` - Trello API client tests
 - `test_web.py` - Web dashboard API, SSE streaming, usage caching tests
+
+`test_claude_md.py` keeps this list honest — adding a `tests/test_*.py` file without listing it here, or listing one that no longer exists, fails the suite.
 
 Use `pytest` with fixtures for async tests. Mock subprocess calls to avoid actual Claude invocations.

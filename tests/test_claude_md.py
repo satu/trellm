@@ -18,9 +18,11 @@ strings) so unrelated copy edits don't break the tests. They will only
 fail if someone removes the load-bearing concept.
 """
 
+import re
 from pathlib import Path
 
 CLAUDE_MD = Path(__file__).parent.parent / "CLAUDE.md"
+TESTS_DIR = Path(__file__).parent
 
 
 def _content() -> str:
@@ -72,3 +74,72 @@ class TestDocsFolderPointerDocumented:
         assert "docs/" in _content(), (
             "CLAUDE.md must reference the docs/ folder for decision notes"
         )
+
+
+class TestRetryBackoffGotchaDocumented:
+    """The per-card retry / exponential-backoff subsystem (commits
+    67002ce, 6281a58, 5d90a67) is a core dispatch mechanism: a
+    non-usage-limit failure that exits fast pushes the card into a
+    backoff window (30s doubling, capped at 30m) instead of busy-looping
+    every poll. CLAUDE.md documented none of it before the 2026-05-17
+    maintenance pass — distinct from the *global* usage-limit pause."""
+
+    def test_backoff_concept_is_documented(self):
+        content = _content().lower()
+        assert "backoff" in content, (
+            "CLAUDE.md must document the per-card retry backoff behavior"
+        )
+
+    def test_exponential_per_card_backoff_is_documented(self):
+        """The load-bearing distinctions: backoff is exponential, and it
+        is per-card (not the global pause). Future readers must find
+        both without spelunking through __main__.py."""
+        content = _content().lower()
+        assert "exponential" in content and "per-card" in content, (
+            "CLAUDE.md must say the retry backoff is exponential and per-card"
+        )
+
+
+def _documented_test_files() -> set:
+    """Test filenames enumerated in CLAUDE.md's Testing section."""
+    content = _content()
+    idx = content.find("## Testing")
+    assert idx != -1, "CLAUDE.md must have a ## Testing section"
+    return set(re.findall(r"test_[a-z_]+\.py", content[idx:]))
+
+
+class TestTestFileListInSync:
+    """CLAUDE.md's Testing section enumerates the test files. Successive
+    maintenance passes kept finding it stale (test_trello.py listed but
+    deleted; five files added but never documented). These tests force
+    the documented list to track tests/ so it cannot drift again."""
+
+    def test_documented_files_all_exist(self):
+        for name in _documented_test_files():
+            assert (TESTS_DIR / name).exists(), (
+                f"CLAUDE.md lists {name} but tests/{name} does not exist"
+            )
+
+    def test_all_test_files_are_documented(self):
+        actual = {p.name for p in TESTS_DIR.glob("test_*.py")}
+        missing = actual - _documented_test_files()
+        assert not missing, (
+            f"CLAUDE.md's Testing section omits: {sorted(missing)}"
+        )
+
+
+class TestReferencedDocsExist:
+    """CLAUDE.md names docs/ files as examples of where investigation
+    cards land. A stale filename sends readers to a missing file, so
+    every lowercase *.md filename CLAUDE.md mentions must resolve to a
+    real file (in docs/ or the repo root)."""
+
+    def test_referenced_md_files_exist(self):
+        repo_root = TESTS_DIR.parent
+        for name in sorted(set(re.findall(r"[a-z0-9-]+\.md", _content()))):
+            exists = (repo_root / "docs" / name).exists() or (
+                repo_root / name
+            ).exists()
+            assert exists, (
+                f"CLAUDE.md references {name} but it exists nowhere"
+            )

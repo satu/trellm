@@ -56,6 +56,10 @@ claude:
       # session_id: "existing-session-id"
       # Optional: custom instructions for /compact command
       # compact_prompt: "Preserve Trello workflow context and session management patterns"
+      # Optional: per-project timeout in seconds (overrides claude.timeout
+      # above). Use for projects whose tasks routinely need longer than
+      # the global default.
+      # timeout: 1800
       # Optional: per-project maintenance settings (overrides global)
       # maintenance:
       #   enabled: true

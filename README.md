@@ -74,6 +74,11 @@ kill $(cat /var/run/trellm.pid) # Stop
    - Generate a token from the same page (click "Token" link)
    - Find board/list IDs in the URL when viewing them in Trello
 
+3. Review `config.yaml.example` for optional per-project settings — aliases,
+   session resumption, `compact_prompt`, `maintenance`, `browser`, and a
+   per-project `timeout` (in seconds) that overrides the global
+   `claude.timeout` for projects whose tasks routinely run longer.
+
 ## Usage
 
 ```bash
@@ -121,6 +126,14 @@ After each task, TreLLM logs session usage:
 ### Error Handling
 - **Prompt too long**: Automatically runs `/compact` and retries
 - **Rate limit**: Parses reset time and sleeps until limit resets
+- **Monthly / extra-usage limit**: When Claude reports an account-wide usage
+  limit, the entire polling loop pauses until the limit resets. Cards stay in
+  TODO, and `/abort` / `/restart` still work.
+- **Per-card retry backoff**: A card whose run fails fast (timeout, crash)
+  enters an exponential backoff window — 30s doubling, capped at 30 minutes —
+  instead of being re-dispatched every poll cycle. A retry-context comment is
+  posted on the card so the next run knows how the previous one died. The
+  backoff clears as soon as the card succeeds.
 
 ## Commands
 
@@ -237,8 +250,9 @@ web:
 
 - **Status overview**: Polling state, uptime, configured projects
 - **Running tasks**: Currently processing cards with project, duration, and card links
+- **Queue view**: Cards waiting in TODO, including any held in per-card retry backoff
 - **Live output streaming**: Real-time Claude Code output via SSE while tasks run
-- **Task history**: Last 10 completed tasks with full output
+- **Task history**: Last 10 completed tasks (including timed-out and errored runs) with full output
 - **Stats dashboard**: Per-project and aggregate cost, token usage, card counts
 - **Control actions**: Abort and restart buttons (equivalent to `/abort` and `/restart` commands)
 - **Usage limits**: Cached Anthropic API usage data with 5-minute cooldown
