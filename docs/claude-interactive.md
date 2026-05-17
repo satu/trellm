@@ -6,6 +6,12 @@ defines the abstraction, compares three concrete solutions, picks one,
 and sequences a proof of concept. Implementation lands in follow-up
 cards (see "Milestones").
 
+> **Status (2026-05-17).** M0.5 is resolved: streaming-JSON `claude -p`
+> is *also* metered, so the interactive TUI is the only
+> subscription-covered shape. The transport is decided — **Alternative 1
+> (tmux TUI)**; Alternative 3 is retired. Build milestones M1–M6 are now
+> filed as individual ICE BOX cards.
+
 ## TL;DR
 
 - **Why.** Claude Code is expected to start metering headless `claude -p`
@@ -13,11 +19,11 @@ cards (see "Milestones").
   trellm spawns one `claude -p` subprocess per card today, so every card
   would become a metered call. The interactive TUI stays
   subscription-covered.
-- **Verify the premise first.** The whole card rests on an assumption
-  about Anthropic's billing boundary. **M0.5 is a hard prerequisite**:
-  confirm *which* invocation shapes get metered before any code is
-  written. If the streaming-JSON session mode is subscription-covered,
-  Alternative 3 is far cheaper than the tmux build.
+- **Premise confirmed (M0.5 done).** The billing-boundary question is
+  resolved: streaming-JSON `claude -p` is *also* metered, not just
+  one-shot `-p`. Only the interactive TUI stays subscription-covered, so
+  Alternative 3 is off the table and **Alternative 1 (tmux TUI) is the
+  build**.
 - **Abstraction.** Introduce a `ClaudeSession` seam. The current
   subprocess code becomes `PrintSession` (one stateless subprocess per
   card). The new path is `InteractiveSession` (one long-lived `claude`
@@ -70,7 +76,14 @@ The interactive model inverts the core property: the `claude` process is
 **stateful and long-lived per project**, so "the process exited" is no
 longer the done signal. Everything below follows from that one change.
 
-## 2. The key unknown (resolve in M0.5, before building)
+## 2. The billing boundary (resolved by M0.5)
+
+> **Resolved 2026-05-17.** The streaming-JSON session shape is metered
+> too — *any* `claude -p` invocation is, one-shot or streaming. The
+> interactive TUI is the only subscription-covered shape. **Alternative 1
+> (tmux) is the plan**; Alternative 3 is retired. The §3 seam is still
+> built first (M1) exactly as written — only the transport choice is now
+> fixed. The analysis below is kept as the reasoning that led here.
 
 The card states `claude -p` "will soon start charging". `claude` has
 three relevant invocation shapes:
@@ -242,10 +255,10 @@ a turn.
 - **Cons / risk.** It is still a `claude -p` invocation. **If `-p` is
   metered regardless of one-shot vs. streaming, this does not solve the
   billing problem at all.** Its viability is entirely decided by M0.5.
-- **Verdict.** If M0.5 shows streaming-JSON is subscription-covered, this
-  becomes the recommendation and supersedes Alternative 1. Until then it
-  is documented as the contingency, and `InteractiveSession` is built so
-  a streaming-JSON backend could slot into the same `ClaudeSession` seam.
+- **Verdict — retired.** M0.5 (resolved 2026-05-17) found streaming-JSON
+  is metered too, so this does not solve the billing problem. Alternative
+  1 is the build. The `ClaudeSession` seam still keeps a streaming-JSON
+  backend a drop-in possibility should Anthropic's billing terms change.
 
 **Decision: build the seam (§3) unconditionally; pick the transport
 after M0.5.** The seam is identical work either way.
@@ -313,11 +326,11 @@ applies the §4 confirmation stack.
 Strictly sequential milestones, each its own card and commit, each with
 a stop gate — same discipline as `docs/patchright-mcp.md`.
 
-### M0.5 — Confirm the billing boundary  *(blocking; no code)*
-Establish from Anthropic's billing terms / Claude Code release notes
-which invocation shapes (§2) are metered. Record the finding in a card
-comment. **Gate:** if streaming-JSON is subscription-covered, switch the
-plan to Alternative 3 and skip M3–M5's tmux specifics.
+### M0.5 — Confirm the billing boundary  ✅ *done (2026-05-17)*
+**Outcome:** streaming-JSON `claude -p` is metered too — every `-p`
+invocation is. Only the interactive TUI is subscription-covered.
+**Decision:** build Alternative 1 (tmux TUI); Alternative 3 is retired.
+M1–M6 below proceed with the tmux transport fixed.
 
 ### M1 — Land the `ClaudeSession` seam  *(pure refactor)*
 Extract the `ClaudeSession` protocol and `SessionManager`; wrap today's
