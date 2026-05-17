@@ -146,6 +146,7 @@ Tests mirror the source structure in `tests/`:
 - `test_browser_scripts.py` - Static-structure checks on the browser-stack shell scripts (Xvfb + Chrome + x11vnc + noVNC)
 - `test_claude.py` - Claude subprocess integration tests
 - `test_claude_md.py` - Structural checks pinning load-bearing CLAUDE.md content
+- `test_completion.py` - Interactive-mode completion detector (`trellm/completion.py`: Stop-hook signal watcher, sentinel marker, §4 stack) + `scripts/trellm-stop-hook.sh` checks
 - `test_config.py` - Configuration loading tests
 - `test_icon_utils.py` - `icon_utils` image-processing helper tests
 - `test_main.py` - Command handlers (abort, restart, reset-session), polling loop, and per-card retry/backoff tests
