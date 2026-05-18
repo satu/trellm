@@ -251,7 +251,8 @@ class TestRunMaintenance:
     async def test_run_maintenance_interactive_runner_is_not_supported(self, tmp_path):
         """Maintenance runs `claude -p` directly (print transport). An
         interactive project's maintenance turn would need to be typed into
-        its live TUI window — that wiring is M4 (docs/claude-interactive.md
+        its live TUI window — that wiring is deliberately deferred (M4 landed
+        InteractiveSession but keeps maintenance disabled, docs/claude-interactive.md
         §9). Until then run_maintenance must report 'not supported' for a
         non-print runner instead of silently spawning a metered subprocess."""
         with patch("asyncio.create_subprocess_exec") as mock_exec:

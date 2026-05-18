@@ -239,8 +239,9 @@ async def run_maintenance(
         compact_prompt: Optional custom instructions for /compact
         runner_mode: The `claude` transport for this project, resolved via
             SessionManager.get_runner_mode. Only "print" has a maintenance
-            backend today; interactive maintenance is M4 (see
-            docs/claude-interactive.md §9).
+            backend; interactive maintenance is intentionally not wired yet —
+            M4 landed `InteractiveSession` but keeps maintenance disabled for
+            interactive projects (see docs/claude-interactive.md §9).
 
     Returns:
         MaintenanceResult with success status and summary
@@ -249,12 +250,13 @@ async def run_maintenance(
 
     # Maintenance runs `claude -p` directly (print transport). An interactive
     # project would need its maintenance turn typed into the live TUI window —
-    # that wiring is M4. Until then, don't silently fall back to a metered
-    # subprocess for an interactive project; report it instead.
+    # that wiring is deliberately deferred: M4 landed InteractiveSession but
+    # keeps maintenance disabled for interactive projects. Until it is wired,
+    # don't silently fall back to a metered subprocess; report it instead.
     if runner_mode != "print":
         logger.warning(
             "%sMaintenance skipped: runner mode %r has no maintenance backend "
-            "yet (interactive maintenance lands in M4)",
+            "yet (interactive maintenance is not wired through InteractiveSession)",
             prefix,
             runner_mode,
         )
@@ -262,7 +264,7 @@ async def run_maintenance(
             success=False,
             summary=(
                 f"Maintenance not supported for runner mode '{runner_mode}' yet "
-                "(interactive maintenance lands in M4)."
+                "(interactive maintenance is not wired through InteractiveSession)."
             ),
         )
 

@@ -91,10 +91,15 @@ per card and threads it into `claude.run(..., timeout=…)`. Add e.g.
 `runner` overrides the global `claude.runner`, default `"print"`. It selects
 the `claude` transport — `print` (one `claude -p` subprocess per card) or
 `interactive` (a long-lived TUI). The `ClaudeSession` seam in `session.py`
-(`PrintSession` + `SessionManager`) is what the polling loop and
-`maintenance.py` go through so the transport is chosen per project without
-the call site knowing which is in use. Only `print` has a backend today;
-`interactive` is staged in `docs/claude-interactive.md` (M4).
+(`PrintSession`, `InteractiveSession`, `SessionManager`) is what the polling
+loop and `maintenance.py` go through so the transport is chosen per project
+without the call site knowing which is in use. Both transports have a
+backend: `PrintSession` (one `claude -p` per card) and `InteractiveSession`
+(one long-lived tmux `claude` TUI per project, driving M2's `tmux.py` + M3's
+completion detector — see `docs/claude-interactive.md`). `interactive` stays
+off for every real project until the M5 PoC validates it; `maintenance.py`
+is not yet wired through `InteractiveSession`, so it skips interactive
+projects.
 
 ### Live Output Streaming
 `claude.py` supports an `output_callback` for streaming parsed stdout (text, thinking, tool results) to SSE clients. When set, it enables `--output-format stream-json` and forwards decoded output to the web dashboard:
@@ -149,9 +154,10 @@ Tests mirror the source structure in `tests/`:
 - `test_completion.py` - Interactive-mode completion detector (`trellm/completion.py`: Stop-hook signal watcher, sentinel marker, §4 stack) + `scripts/trellm-stop-hook.sh` checks
 - `test_config.py` - Configuration loading tests
 - `test_icon_utils.py` - `icon_utils` image-processing helper tests
+- `test_interactive_session.py` - `InteractiveSession` interactive `claude` transport backend (`trellm/session.py`: tmux window lifecycle, prompt-file dispatch, §4 confirmation stack, transcript error scan incl. gotcha #8 regression)
 - `test_main.py` - Command handlers (abort, restart, reset-session), polling loop, and per-card retry/backoff tests
 - `test_maintenance.py` - Maintenance skill tests
-- `test_session.py` - `ClaudeSession` transport seam (`PrintSession`, `SessionManager`)
+- `test_session.py` - `ClaudeSession` transport seam (`PrintSession`, `InteractiveSession` resolution, `SessionManager`)
 - `test_start_script.py` - `start-trellm.sh` startup script tests
 - `test_start_trellm.py` - Browser-stack auto-start path (`scripts/needs-browser-stack.py` + `start-trellm.sh`)
 - `test_state.py` - State persistence tests

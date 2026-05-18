@@ -15,7 +15,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 from trellm.claude import ClaudeResult
 from trellm.config import ClaudeConfig, Config, ProjectConfig, TrelloConfig
-from trellm.session import ClaudeSession, PrintSession, SessionManager
+from trellm.session import (
+    ClaudeSession,
+    InteractiveSession,
+    PrintSession,
+    SessionManager,
+)
 from trellm.state import StateManager
 from trellm.trello import TrelloCard
 
@@ -87,16 +92,27 @@ class TestSessionManagerResolution:
         )
         assert manager.session_for("demo") is not manager.session_for("demo")
 
-    def test_session_for_interactive_raises(self, tmp_path):
-        """The interactive transport has no backend in M1 — resolving an
-        interactive project must fail loudly rather than silently run
-        print mode (interactive lands in M4)."""
+    def test_session_for_interactive_returns_interactive_session(self, tmp_path):
+        """The interactive transport has a backend as of M4 — resolving an
+        interactive project yields an InteractiveSession that satisfies the
+        ClaudeSession protocol."""
         config = _config(runner="interactive")
         manager = SessionManager(
             config=config, runner=_runner(), state=StateManager(str(tmp_path / "s.json")),
         )
-        with pytest.raises(ValueError, match="interactive"):
-            manager.session_for("demo")
+        session = manager.session_for("demo")
+        assert isinstance(session, InteractiveSession)
+        assert isinstance(session, ClaudeSession)
+
+    def test_session_for_interactive_is_reused(self, tmp_path):
+        """Interactive sessions are long-lived per project — the manager
+        returns the SAME instance across calls so the tmux window and the
+        `claude` context persist between cards (unlike fresh PrintSessions)."""
+        config = _config(runner="interactive")
+        manager = SessionManager(
+            config=config, runner=_runner(), state=StateManager(str(tmp_path / "s.json")),
+        )
+        assert manager.session_for("demo") is manager.session_for("demo")
 
     @pytest.mark.asyncio
     async def test_shutdown_is_noop(self, tmp_path):

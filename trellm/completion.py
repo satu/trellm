@@ -257,6 +257,22 @@ def read_transcript_summary(transcript_path) -> str:
     return _strip_sentinel_line(blocks[-1]).strip()
 
 
+def read_transcript_text(transcript_path) -> str:
+    """Every assistant text block in the transcript, joined newline-separated.
+
+    M4's error scan (doc §6.3) runs Claude Code's `_check_for_errors` regexes
+    over this text — the move off subprocess stderr must not lose rate-limit
+    / monthly-limit detection (CLAUDE.md gotcha #8). Only *assistant* turns
+    are included, for the same reason `transcript_has_sentinel` ignores user
+    turns: the dispatched prompt is a user turn and may quote error wording
+    (e.g. a card whose description discusses rate limits) that must not
+    self-trigger the detector.
+
+    Empty string when the transcript has no assistant text or is missing.
+    """
+    return "\n".join(_iter_assistant_text(transcript_path))
+
+
 def transcript_path_resolver(working_dir: Optional[str]) -> Callable[[str], Optional[Path]]:
     """Build a `session_id -> transcript JSONL path` resolver for a project.
 
