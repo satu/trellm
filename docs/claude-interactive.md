@@ -354,6 +354,17 @@ Wire M2 + M3 into a `ClaudeSession`. Behind `runner: interactive`, off
 for every real project. Unit tests mock `tmux.py` and the detector.
 
 ### M5 — PoC test project  *(the live test)*
+
+> **Status (2026-05-19).** The PoC scaffold is built — `~/src/itest`
+> (interactive) + `~/src/iprint` (print baseline) repos with the Stop
+> hook installed, an isolated `~/.trellm/itest-config.yaml`, and the
+> `itest-TODO`/`itest-READY` Trello lists. The live run is not driven by
+> the M5 prep agent itself: that agent runs inside the production trellm
+> daemon (its own parent), which gate 3 would have to restart, and is
+> bounded by the 20-minute card timeout. The live test is therefore an
+> operator step — see **`docs/m5-poc-runbook.md`** for the exact
+> per-gate procedure and results template.
+
 Create a throwaway project — `itest`, a minimal git repo at `~/src/itest`
 (use the `create-project` skill; it installs the Stop hook). Set
 `runner: interactive`. File a sequence of trivial cards: *"itest add a
